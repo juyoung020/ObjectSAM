@@ -84,21 +84,21 @@ Results on held-out simulated houses (robot-height camera, 10 unseen houses):
 
 | | FastSAM-s | ObjectSAM |
 |---|---|---|
-| objects found | 0.793 | **0.803** |
-| unseen categories found | 0.668 | **0.695** |
-| false masks on wall/ceiling/floor, per frame | 4.44 | **1.55** (−65 %) |
-| masks per object (lower = fewer fragments) | 2.77 | **2.51** |
-| masks merging two objects, per frame | 1.66 | 1.69 |
+| recall: objects found (fraction of GT objects) | 0.793 | **0.803** |
+| recall on categories never seen in training | 0.668 | **0.695** |
+| false masks on wall/ceiling/floor (count per image) | 4.44 | **1.55** (−65 %) |
+| masks per found object (over-segmentation; 1 = ideal) | 2.77 | **2.51** |
+| masks merging two objects (under-segmentation, count per image) | 1.66 | 1.69 |
 | model size | 11.8 M params | **2.7 M params** |
 
-- **Recall:** in no group (object size, doors/windows/stairs, categories never seen in training) is recall significantly lower than FastSAM-s's. The weakest group is doors/windows/stairs at −0.2 points (95 % CI [−3.0, +2.3]).
+- **Recall:** in no group (object size, doors/windows/stairs, categories never seen in training) is recall significantly lower than FastSAM-s's. The weakest group is doors/windows/stairs at −0.2 recall points (95 % CI [−3.0, +2.3]).
 - **COCO and ADE20K:** recall is higher (COCO 0.530 vs 0.499, ADE20K 0.628 vs 0.581).
-- Full tables are in [docs/TRAINING.md](docs/TRAINING.md).
+- A mask "finds" an object when ≥ 50 % of the mask's pixels lie on it. Precision/F1 are not used, because the datasets leave many real objects unlabeled; false positives are measured as masks on wall/ceiling/floor instead. Definitions and full tables are in [docs/TRAINING.md](docs/TRAINING.md).
 
 ## Things to know
 
 - **Real photos.** The gain over FastSAM is biggest on robot-height indoor views. On real photos (COCO, ADE20K), wall/floor false masks are about the same as FastSAM's.
-- **Masks are a bit conservative.** They hug the object, so whole-object IoU is somewhat lower than FastSAM's (0.633 vs 0.676 on the simulated houses).
+- **Masks are a bit conservative.** They hug the object, so recall at mask IoU ≥ 0.5 is somewhat lower than FastSAM's (0.633 vs 0.676 on the simulated houses).
 - **Real video can give more masks.** The threshold was set to keep recall on simulator images. If you get too many masks on your camera, pick your own threshold with `tools/sweep_t.py` and bake it in with `tools/calibrate.py` (see [docs/TRAINING.md](docs/TRAINING.md)).
 - **Parts stay with their object.** Clothes on a person and drawers in a cabinet are not separate masks, on purpose.
 - **Tiny objects** (under about 32 × 32 px at 416 input) are still hard.

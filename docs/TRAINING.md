@@ -50,7 +50,7 @@ Ultralytics training at 416, SGD, cosine schedule, mosaic, `overlap_mask=False`,
    - In the mask BCE, pixels that belong to *another* labelled instance in the same image (and not to the target) are weighted ×3.
    - A chair mask that spills onto the table or a person costs more.
    - Nested targets (clothes inside a person) are not penalised, because their pixels are positive for the outer object.
-   - This halved under-segmentation (per frame: simulator 3.42 → 1.69, COCO 7.33 → 4.76, ADE20K 8.22 → 6.31). The cost is more conservative masks (simulator IoU ≥ 0.5: 0.698 → 0.633).
+   - This halved under-segmentation (merged masks per frame: simulator 3.42 → 1.69, COCO 7.33 → 4.76, ADE20K 8.22 → 6.31). The cost is more conservative masks (simulator recall @ IoU 0.5: 0.698 → 0.633).
 
 Two things were tried and did **not** help:
 - **Training longer.** The curves were flat after about 20 epochs, which looks like the capacity of a 2.7 M-parameter model.
@@ -73,45 +73,51 @@ Both models use the same inference path:
 
 `tools/ref_detect.py` reproduces this with ONNX Runtime.
 
-**Metrics** (held-out data, every 2nd evaluation frame):
-- **found**: some predicted mask lies ≥ 50 % on the object.
-- **IoU ≥ 0.5**: whole-object hit.
-- **over-segmentation**: predicted masks per found object.
-- **under-segmentation**: masks per frame that cover ≥ 20 % of two GT instances, or ≥ 20 % of one GT instance while ≥ 30 % of the mask lies on wall/floor/ceiling.
+**Metrics** (held-out data, every 2nd evaluation frame). Each ground-truth object is matched against all predicted masks of its frame.
+
+| metric | type | definition | better |
+|---|---|---|---|
+| **Recall** | fraction of GT objects (0–1) | the object counts as found if at least one predicted mask has ≥ 50 % of its pixels on the object. This is the condition under which a mapping pipeline creates a node for it | higher |
+| **Recall @ IoU 0.5** | fraction of GT objects (0–1) | the best-matching predicted mask has mask IoU ≥ 0.5 with the object, i.e. the object is found *whole* | higher |
+| **Structure false masks / frame** | count per image | predicted masks with ≥ 50 % of their pixels on wall, ceiling or floor | lower |
+| **Masks per found object** (over-segmentation) | count | number of predicted masks lying on each found object, averaged | lower (1 = one mask per object) |
+| **Merged masks / frame** (under-segmentation) | count per image | predicted masks that cover ≥ 20 % of two GT objects (e.g. chair + table), or ≥ 20 % of one GT object while ≥ 30 % of the mask is wall/ceiling/floor (e.g. picture + wall). Masks of objects nested inside another (clothes on a person) are not counted | lower |
+
+No precision or F1 is reported. The model is class-agnostic and open-world, so many correct masks fall on objects that the datasets do not label, and they would be counted as false positives. False positives are measured on what is known to be wrong instead: masks on wall, ceiling or floor.
 
 | | FastSAM-s | ObjectSAM |
 |---|---|---|
 | **BEHAVIOR held-out scenes** (10 scenes) | | |
-| found: all / doors-windows-stairs / unseen categories | 0.793 / 0.866 / 0.668 | 0.803 / 0.864 / 0.695 |
-| wall/ceiling/floor false masks per frame | 4.44 | **1.55** |
-| masks per found object | 2.77 | **2.51** |
-| under-segmented masks per frame | 1.66 | 1.69 |
-| IoU ≥ 0.5 | **0.676** | 0.633 |
+| Recall: all / doors-windows-stairs / unseen categories | 0.793 / 0.866 / 0.668 | 0.803 / 0.864 / 0.695 |
+| Structure false masks / frame | 4.44 | **1.55** |
+| Masks per found object | 2.77 | **2.51** |
+| Merged masks / frame | 1.66 | 1.69 |
+| Recall @ IoU 0.5 | **0.676** | 0.633 |
 | **COCO val2017** (1,500 images) | | |
-| found: all / small / large / doors-windows-stairs / held-out LVIS | 0.499 / 0.055 / 0.962 / 0.863 / 0.346 | **0.530** / 0.068 / 0.976 / 0.863 / 0.358 |
-| wall/ceiling/floor false masks per frame | 6.06 | 6.91 |
-| under-segmented masks per frame | 3.33 | 4.76 |
-| IoU ≥ 0.5 | 0.422 | 0.431 |
+| Recall: all / small / large / doors-windows-stairs / held-out LVIS categories | 0.499 / 0.055 / 0.962 / 0.863 / 0.346 | **0.530** / 0.068 / 0.976 / 0.863 / 0.358 |
+| Structure false masks / frame | 6.06 | 6.91 |
+| Merged masks / frame | 3.33 | 4.76 |
+| Recall @ IoU 0.5 | 0.422 | 0.431 |
 | **ADE20K val, indoor** (1,021 images) | | |
-| found: all / doors-windows-stairs | 0.581 / 0.785 | **0.628** / **0.816** |
-| wall/ceiling/floor false masks per frame | 10.05 | 10.81 |
-| under-segmented masks per frame | 3.75 | 6.31 |
-| IoU ≥ 0.5 | 0.501 | **0.545** |
+| Recall: all / doors-windows-stairs | 0.581 / 0.785 | **0.628** / **0.816** |
+| Structure false masks / frame | 10.05 | 10.81 |
+| Merged masks / frame | 3.75 | 6.31 |
+| Recall @ IoU 0.5 | 0.501 | **0.545** |
 | ONNX / TensorRT FP16 engine size | 47 MB / 25 MB | **11 MB / 7 MB** |
 
 **Recall gate**
-- Per bucket (size classes, doors/windows/stairs, unseen categories) and per dataset, with a paired frame bootstrap.
+- Recall of ObjectSAM minus recall of FastSAM-s, per bucket (size classes, doors/windows/stairs, unseen categories) and per dataset, with a paired frame bootstrap.
 - It passes on all three datasets.
-- The weakest buckets are BEHAVIOR doors/windows/stairs at −0.2 points (95 % CI [−3.0, +2.3]) and BEHAVIOR medium objects at −0.5 [−4.4, +3.3].
+- The weakest buckets are BEHAVIOR doors/windows/stairs at −0.2 recall points (percentage points, ObjectSAM minus FastSAM-s) (95 % CI [−3.0, +2.3]) and BEHAVIOR medium objects at −0.5 [−4.4, +3.3].
 
 ## Precision and quantization (`tools/quant_engine.py`)
 
-**FP16** needs no FP32-pinned layers. TensorRT FP16 vs ONNX Runtime FP32 on BEHAVIOR: found 0.805 vs 0.806; IoU ≥ 0.5 0.629 vs 0.636.
+**FP16** needs no FP32-pinned layers. TensorRT FP16 vs ONNX Runtime FP32 on BEHAVIOR: recall 0.805 vs 0.806; recall @ IoU 0.5 0.629 vs 0.636.
 
 **INT8 post-training quantization**
 - Method: explicit Q/DQ with onnxruntime static quantization (Conv only, symmetric, per-channel weights) over 512 calibration images (half simulator, half COCO/ADE), then TensorRT `--int8 --fp16`.
 - TensorRT 10.16's implicit (calibrator) INT8 fails to build this graph, which is why explicit Q/DQ is used.
-- Entropy calibration, entropy with the head (`model.23`) left in FP16, and the 99.99 percentile all pass the recall gate. MinMax fails it (doors/windows/stairs −1.8 points).
+- Entropy calibration, entropy with the head (`model.23`) left in FP16, and the 99.99 percentile all pass the recall gate. MinMax fails it (doors/windows/stairs recall −1.8 points).
 - The cost of INT8 is about +0.3 wall/floor false masks per frame on simulator images.
 - The released `ObjectSAM-416-int8-qdq.onnx` is entropy with the head in FP16. Quantization-aware training was not needed.
 
