@@ -1,6 +1,6 @@
 # ObjectSAM
 
-![FastSAM-s vs ObjectSAM: ObjectSAM leaves the ceiling and walls unsegmented](assets/cover.jpg)
+![FastSAM-s vs ObjectSAM: ObjectSAM leaves the ceiling and walls unsegmented](assets/objectsam_cover.jpg)
 
 **Segment every object in an image, but not the walls, ceiling or floor.**
 
