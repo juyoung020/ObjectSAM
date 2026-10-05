@@ -1,5 +1,7 @@
 # ObjectSAM
 
+![FastSAM-s vs ObjectSAM: ObjectSAM leaves the ceiling and walls unsegmented](assets/cover.jpg)
+
 **Segment every object in an image, but not the walls, ceiling or floor.**
 
 ObjectSAM is a small, fast, class-agnostic instance segmentation model for robots and mapping. It is a YOLO26n-seg student distilled from FastSAM:
@@ -133,3 +135,4 @@ The weights were trained on COCO, LVIS, ADE20K and BEHAVIOR-1K renders. Some of 
 - FastSAM: Zhao et al., *Fast Segment Anything*, 2023 (CASIA-IVA-Lab). The FastSAM-s weights are from Ultralytics.
 - Ultralytics YOLO26 / YOLOv8 (AGPL-3.0).
 - Data: COCO, LVIS, ADE20K, BEHAVIOR-1K / OmniGibson.
+- Cover photo: COCO val2017 image 166918, from [Flickr](http://farm5.staticflickr.com/4117/4745624149_369a63786e_z.jpg), licensed [CC BY 2.0](http://creativecommons.org/licenses/by/2.0/). Masks overlaid; left FastSAM-s, right ObjectSAM, both at conf 0.25.
