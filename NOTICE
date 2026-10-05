@@ -1,0 +1,11 @@
+ObjectSAM
+Copyright (C) 2026 the ObjectSAM authors. Licensed under the GNU Affero General Public License v3.0 (see LICENSE).
+
+This work is derived from and builds on:
+- FastSAM (Fast Segment Anything), CASIA-IVA-Lab - https://github.com/CASIA-IVA-Lab/FastSAM
+- Ultralytics YOLOv8 / YOLO26 and the FastSAM-s weights distributed by Ultralytics (AGPL-3.0) - https://github.com/ultralytics/ultralytics
+The released ObjectSAM weights are fine-tuned from the Ultralytics FastSAM-s checkpoint and are distributed under AGPL-3.0.
+
+Training data (not redistributed here): COCO / COCO-panoptic (CC BY 4.0 annotations, Flickr-licensed images),
+LVIS v1 (CC BY 4.0), ADE20K (MIT CSAIL terms, non-commercial images; BSD-3 annotations),
+BEHAVIOR-1K scenes rendered with OmniGibson (BEHAVIOR dataset terms, non-commercial research).

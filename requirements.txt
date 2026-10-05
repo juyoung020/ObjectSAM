@@ -1,0 +1,16 @@
+# training / labels / evaluation (Python 3.11, CUDA 12.x build of torch)
+torch>=2.4
+torchvision
+ultralytics==8.4.171
+numpy
+opencv-python
+pillow
+pycocotools
+onnx
+onnxslim
+onnxruntime
+# simulator ground truth (ray-cast instance labels)
+trimesh
+embreex
+# optional: TensorRT engine build / ovdet-backed evaluation
+# tensorrt
