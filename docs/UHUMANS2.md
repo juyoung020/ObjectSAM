@@ -51,6 +51,8 @@ Objects ≥ 50 % covered by one mask, by size and scene:
 | apartment | 0.714 | **0.874** |
 | office | 0.744 | **0.781** |
 
+Objects ≥ 80 % covered by one mask: apartment 0.543 → **0.674**, office 0.492 → 0.490.
+
 Sizes are measured on a 256×192 grid: small < 1,024 cells, large ≥ 4,096 cells.
 
 ## Recall at mask IoU ≥ 0.5
@@ -75,6 +77,7 @@ Sizes are measured on a 256×192 grid: small < 1,024 cells, large ≥ 4,096 cell
 | share of masks on structure | 0.536 | **0.369** |
 | large structure masks (≥ 4,096 cells), apartment | 658 | **62** |
 | large structure masks (≥ 4,096 cells), office | 6,710 | **4,199** |
+| share of the frontend's 3D points that come from structure | 0.654 | **0.420** |
 
 - The masks that cover whole walls, floors and ceilings mostly disappear. What remains on structure is small pieces.
 - In the office scenes, uHumans2 paints glass partitions, glass doors and windows with the **wall** colour.
@@ -84,6 +87,7 @@ Sizes are measured on a 256×192 grid: small < 1,024 cells, large ≥ 4,096 cell
 
 | RTX 3060, TensorRT FP16 | FastSAM-s | ObjectSAM |
 |---|---|---|
+| parameters | 11.8 M | **2.7 M** |
 | network | 5.13 ms | **1.11 ms** |
 | segmentation step of the frontend | 5.85 ms | **1.82 ms** |
 | engine file | 27.5 MB | **9.8 MB** |
@@ -103,7 +107,7 @@ so they count as false positives:
 | objects split into pieces | 1,163 | 1,028 |
 
 Downstream, the frontend's 3D object recall rose (0.824 → 0.880) and its geometry stayed the same (F-score at 20 cm 0.881 → 0.876),
-but with more observations to associate, its tracking scores fell (HOTA 0.408 → 0.300). The tracker was tuned for FastSAM-s.
+but with more observations to associate, its tracking scores fell (HOTA 0.408 → 0.300, IDF1 0.339 → 0.210). The tracker was tuned for FastSAM-s.
 
 If your downstream step is sensitive to the number of masks, raise the threshold for your camera with
 `tools/sweep_t.py` and bake it in with `tools/calibrate.py` (see [TRAINING.md](TRAINING.md)).
