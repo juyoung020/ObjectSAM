@@ -93,6 +93,7 @@ Results on held-out simulated houses (robot-height camera, 10 unseen houses):
 
 - **Recall:** in no group (object size, doors/windows/stairs, categories never seen in training) is recall significantly lower than FastSAM-s's. The weakest group is doors/windows/stairs at −0.2 recall points (95 % CI [−3.0, +2.3]).
 - **COCO and ADE20K:** recall is higher (COCO 0.530 vs 0.499, ADE20K 0.628 vs 0.581).
+- **uHumans2 (never seen in training):** in a mapping frontend, wall/floor/ceiling coverage halves (0.673 → 0.357) and object coverage rises (0.795 → 0.833), at 4.6× the speed of FastSAM-s. Costs and details: [docs/UHUMANS2.md](docs/UHUMANS2.md).
 - A mask "finds" an object when ≥ 50 % of the mask's pixels lie on it. Precision/F1 are not used, because the datasets leave many real objects unlabeled; false positives are measured as masks on wall/ceiling/floor instead. Definitions and full tables are in [docs/TRAINING.md](docs/TRAINING.md).
 
 ## Things to know
