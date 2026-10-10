@@ -23,12 +23,13 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 
 COCO = 'data/coco'
-BG = {  # 배경 stuff 19 종(SPEC 4 절)
+BG = {  # 배경 stuff 22 종(SPEC 4 절)
     'wall-brick', 'wall-stone', 'wall-tile', 'wall-wood', 'wall-other-merged',
     'ceiling-merged',
     'floor-wood', 'floor-other-merged', 'road', 'pavement-merged', 'dirt-merged', 'sand', 'gravel', 'snow',
     'grass-merged', 'playingfield', 'railroad', 'platform',
     'sky-other-merged',
+    'building-other-merged', 'house', 'roof',  # 건물도 구조물(2026-10-11)
 }
 N_VAL = 5000
 MIN_PIECE = 16          # stuff 조각 최소 넓이(화소) — 1 칸도 안 되는 부스러기만
