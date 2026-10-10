@@ -10,6 +10,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "core.h"
@@ -28,6 +29,7 @@ struct InstInfo {       // 정답 후보 하나(원본 기준)
   int mx0, my0, mcw, mch;  // 마스크 상자(마스크 화소): 시작, 크기
   int wpr;              // 비트맵 한 행의 u32 수
   int64_t mask_off;     // 마스크 덩어리 안 u32 위치
+  int ignore;           // 1 = 무시 영역(정답이 아니라 손실에서 뺄 곳)
 };
 struct SampleInfo {     // 출력 영상 하나
   int src[4];           // 타일별 원본(없으면 −1)
@@ -52,6 +54,11 @@ struct DataCfg {
   float mosaic = 1.f, scale = 0.5f, translate = 0.1f, fliplr = 0.5f;
   float hsv_h = 0.015f, hsv_s = 0.7f, hsv_v = 0.4f;
   uint64_t seed = 0;
+  // 선생 라벨에서 바로 읽기(docs/LABELS.md 5 절). teacher_ftl 이 있으면 shards 대신 쓴다.
+  std::string teacher_ftl, teacher_plan, teacher_siglip;  // siglip 은 없어도 됨(그러면 후보는 물체)
+  std::string images = "data/coco/train2017", nonjpeg = "data/teacher/nonjpeg";
+  std::string exclude_ids;                                 // 학습에서 뺄 image_id(JSON 정수 목록, 검증으로 뗀 것)
+  float score_thr = 0.5f, siglip_thr = 0.8f;
 };
 
 // 배치 버퍼 하나(pinned). 장치 쪽은 같은 크기로 학습기가 잡는다.
@@ -91,7 +98,15 @@ class Dataset {
   struct Rec { int shard; int64_t off, len; };
   struct Shard { const uint8_t* base = nullptr; size_t len = 0; int fd = -1; };
   std::vector<Shard> shards_;
-  std::vector<Rec> train_;
+  std::vector<Rec> train_;   // 선생 라벨이면 shard = -1, off = trec_ 번호
+  struct TRec { uint32_t id; int64_t ftl, plan; int w, h; };
+  std::vector<TRec> trec_;
+  Shard ftl_, plan_;
+  std::unordered_map<uint32_t, std::vector<std::pair<uint16_t, float>>> siglip_;
+  void open_teacher();
+  void src_size(const Rec& r, int& w, int& h, int& mw, int& mh) const;
+  void decode_teacher(const Rec& r, BatchBuf& b, int si, int sample, int tile, int64_t img_off, int64_t& mask_cursor,
+                      std::mutex& mu);
   // 배치 준비
   void fill(BatchBuf& b, int64_t batch_index);
   void decode_src(const Rec& r, BatchBuf& b, int si, int sample, int tile, int64_t img_off, int64_t& mask_cursor,

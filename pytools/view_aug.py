@@ -24,6 +24,9 @@ def main(src, dst):
         for j in rng.permutation(len(m)):
             mm = cv2.resize(m[j], (S, S), interpolation=cv2.INTER_NEAREST).astype(bool)
             over[mm] = 0.45 * over[mm] + 0.55 * rng.uniform(40, 255, 3)
+        if 'ignore' in t:  # 무시 영역: 자홍
+            ig = cv2.resize(t['ignore'][i], (S, S), interpolation=cv2.INTER_NEAREST).astype(bool)
+            over[ig] = 0.3 * over[ig] + 0.7 * np.array([255, 0, 255.])
         over = over.astype(np.uint8)
         for b in bx:
             cv2.rectangle(over, (int(b[0]), int(b[1])), (int(b[2]), int(b[3])), (255, 255, 255), 1)

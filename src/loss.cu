@@ -281,6 +281,8 @@ struct DetArgs {
   const int* agt;
   const float* tsc;
   const float4* gtb;
+  const uint32_t* ignore;  // 무시 영역 비트(없으면 nullptr)
+  int Hp, Wp;
   float* items;
   const float* scale;
   float box_gain, cls_gain, dfl_gain;
@@ -298,8 +300,15 @@ __global__ void k_det(DetArgs P) {
     int j = P.agt[q];
     float t = j >= 0 ? P.tsc[q] : 0.f;
     float x = to_f(P.cls[l][pix]);
-    lcls = bce_logits(x, t);
-    P.dcls[l][pix] = from_f<act_t>((sigm(x) - t) * P.cls_gain * sc);
+    bool ign = false;
+    if (j < 0 && P.ignore) {  // 앵커 중심이 무시 영역 안이면 점수 손실 없음
+      int cs = P.imgsz / P.Wp;
+      int cx = min(P.Wp - 1, int((w + 0.5f) * P.L.s[l]) / cs), cy = min(P.Hp - 1, int((h + 0.5f) * P.L.s[l]) / cs);
+      int64_t bit = int64_t(cy) * P.Wp + cx;
+      ign = P.ignore[int64_t(b) * (P.Hp * P.Wp / 32) + (bit >> 5)] >> (bit & 31) & 1u;
+    }
+    lcls = ign ? 0.f : bce_logits(x, t);
+    P.dcls[l][pix] = from_f<act_t>(ign ? 0.f : (sigm(x) - t) * P.cls_gain * sc);
     act_t* db = P.dbox[l] + pix * 4 * kReg;
     if (j < 0) {
       for (int k = 0; k < 4 * kReg; k++) db[k] = from_f<act_t>(0.f);
@@ -523,6 +532,7 @@ void SegLoss::run(const HeadIO& io, const GtBatch& gt, const float* scale, cudaS
     D.box[l] = io.box[l]; D.cls[l] = io.cls[l]; D.dbox[l] = io.dbox[l]; D.dcls[l] = io.dcls[l]; D.dcoef[l] = io.dcoef[l];
   }
   D.agt = agt_; D.tsc = tsc_; D.gtb = gt.box; D.items = items_; D.scale = scale;
+  D.ignore = gt.ignore; D.Hp = cfg.Hp; D.Wp = cfg.Wp;
   D.box_gain = cfg.box_gain; D.cls_gain = cfg.cls_gain; D.dfl_gain = cfg.dfl_gain;
   DecArgs da;
   for (int l = 0; l < 3; l++) { da.box[l] = io.box[l]; da.cls[l] = io.cls[l]; }

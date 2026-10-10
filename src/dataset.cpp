@@ -82,6 +82,47 @@ inline void set_bits(uint32_t* row, int c0, int c1) {
   }
 }
 
+// 파일 전체를 mmap(읽기 전용)
+struct Mapped { const uint8_t* base; size_t len; int fd; };
+Mapped map_file(const std::string& path) {
+  int fd = ::open(path.c_str(), O_RDONLY);
+  FSO_ASSERT(fd >= 0, "open %s", path.c_str());
+  struct stat st;
+  fstat(fd, &st);
+  void* m = mmap(nullptr, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+  FSO_ASSERT(m != MAP_FAILED, "mmap %s", path.c_str());
+  madvise(m, st.st_size, MADV_RANDOM);
+  return {static_cast<const uint8_t*>(m), size_t(st.st_size), fd};
+}
+std::vector<uint8_t> read_file(const std::string& path) {
+  std::ifstream f(path, std::ios::binary);
+  return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), {});
+}
+uint32_t leb(const uint8_t*& p) {
+  uint32_t v = 0;
+  int sh = 0;
+  uint8_t b;
+  do { b = *p++; v |= uint32_t(b & 0x7F) << sh; sh += 7; } while (b & 0x80);
+  return v;
+}
+// 화소 [s, e)(행 우선, 너비 W)를 상자 (x0, y0, cw) 비트맵에 칠한다
+inline void paint(uint32_t* bits, int x0, int y0, int cw, int wpr, int64_t s, int64_t e, int W) {
+  while (s < e) {
+    int r = int(s / W), c = int(s % W);
+    int c1 = int(std::min<int64_t>(W, c + (e - s)));
+    int a = std::max(c, x0) - x0, z = std::min(c1, x0 + cw) - x0;
+    if (z > a) set_bits(&bits[int64_t(r - y0) * wpr], a, z);
+    s += c1 - c;
+  }
+}
+// 구간 [s, s+n) 이 상자에 주는 영향(같은 행이면 그 열들, 여러 행이면 전체 너비)
+inline void grow(int& x0, int& y0, int& x1, int& y1, int64_t s, int64_t n, int W) {
+  int r0 = int(s / W), r1 = int((s + n - 1) / W);
+  y0 = std::min(y0, r0); y1 = std::max(y1, r1);
+  if (r0 == r1) { x0 = std::min(x0, int(s % W)); x1 = std::max(x1, int((s + n - 1) % W)); }
+  else { x0 = 0; x1 = W - 1; }
+}
+
 double now_ms() {
   return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -151,7 +192,76 @@ void Dataset::open(const DataCfg& c) {
     for (size_t i = 0; i + 1 < n; i++) train_.push_back({int(si), int64_t(off[i]), int64_t(off[i + 1] - off[i])});
     shards_.push_back(sh);
   }
-  printf("dataset: %zu shards, %zu images, %ld batches/epoch\n", shards_.size(), train_.size(), batches_per_epoch());
+  if (!c.teacher_ftl.empty()) open_teacher();
+  else printf("dataset: %zu shards, %zu images, %ld batches/epoch\n", shards_.size(), train_.size(), batches_per_epoch());
+}
+
+// 선생 라벨(FTL1)과 판정 파일(FTP1)을 같은 순서로 훑어 사진 목록을 만든다. SigLIP2 결과(FTS1)는 있으면 읽는다.
+void Dataset::open_teacher() {
+  Mapped f = map_file(cfg.teacher_ftl), p = map_file(cfg.teacher_plan);
+  ftl_.base = f.base; ftl_.len = f.len; ftl_.fd = f.fd;
+  plan_.base = p.base; plan_.len = p.len; plan_.fd = p.fd;
+  std::unordered_map<uint32_t, int> excl;
+  if (!cfg.exclude_ids.empty()) {
+    auto txt = read_file(cfg.exclude_ids);
+    std::string s(txt.begin(), txt.end());
+    for (size_t i = 0; i < s.size();) {
+      if (isdigit(s[i])) { size_t j = i; while (j < s.size() && isdigit(s[j])) j++; excl[uint32_t(std::stoul(s.substr(i, j - i)))] = 1; i = j; }
+      else i++;
+    }
+  }
+  size_t a = 0, b = 0, skipped = 0;
+  while (a < f.len) {
+    FSO_ASSERT(!memcmp(f.base + a, "FTL1", 4) && !memcmp(p.base + b, "FTP1", 4), "teacher/plan record at %zu/%zu", a, b);
+    uint32_t id, pid;
+    uint16_t H, W, n, nd, nc, ne;
+    memcpy(&id, f.base + a + 4, 4); memcpy(&H, f.base + a + 8, 2); memcpy(&W, f.base + a + 10, 2); memcpy(&n, f.base + a + 12, 2);
+    memcpy(&pid, p.base + b + 4, 4); memcpy(&nd, p.base + b + 8, 2); memcpy(&nc, p.base + b + 10, 2); memcpy(&ne, p.base + b + 12, 2);
+    FSO_ASSERT(id == pid, "teacher %u vs plan %u", id, pid);
+    if (excl.count(id)) skipped++;
+    else { trec_.push_back({id, int64_t(a), int64_t(b), int(W), int(H)}); train_.push_back({-1, int64_t(trec_.size() - 1), 0}); }
+    uint32_t nb;
+    memcpy(&nb, f.base + a + 16 + size_t(n) * 8, 4);
+    a += 16 + size_t(n) * 8 + 4 + nb;
+    size_t q = b + 16 + 2 * size_t(nd) + 2 * size_t(nc);
+    for (int e = 0; e <= ne; e++) {  // 나눈 조각 ne 개 + 무시 영역 하나
+      uint32_t ln;
+      memcpy(&ln, p.base + q, 4);
+      q += 4 + ln;
+    }
+    b = q;
+  }
+  size_t ncand = 0;
+  if (!cfg.teacher_siglip.empty()) {
+    auto s = read_file(cfg.teacher_siglip);
+    for (size_t q = 0; q + 12 <= s.size();) {
+      FSO_ASSERT(!memcmp(&s[q], "FTS1", 4), "siglip record");
+      uint32_t id;
+      uint16_t n;
+      memcpy(&id, &s[q + 4], 4); memcpy(&n, &s[q + 8], 2);
+      auto& v = siglip_[id];
+      for (int k = 0; k < n; k++) {
+        uint16_t m;
+        float pr;
+        memcpy(&m, &s[q + 12 + k * 6], 2); memcpy(&pr, &s[q + 14 + k * 6], 4);
+        v.push_back({m, pr});
+      }
+      ncand += n;
+      q += 12 + size_t(n) * 6;
+    }
+  }
+  printf("dataset: teacher labels, %zu images (%zu excluded), siglip %zu judged masks, %ld batches/epoch\n", trec_.size(),
+         skipped, ncand, batches_per_epoch());
+}
+
+void Dataset::src_size(const Rec& r, int& w, int& h, int& mw, int& mh) const {
+  if (r.shard < 0) {
+    w = mw = trec_[r.off].w;
+    h = mh = trec_[r.off].h;
+    return;
+  }
+  RecHead hd = parse_head(shards_[r.shard].base + r.off);
+  w = hd.iw; h = hd.ih; mw = hd.mw; mh = hd.mh;
 }
 
 std::vector<int64_t> Dataset::perm(int64_t epoch) {
@@ -166,6 +276,7 @@ std::vector<int64_t> Dataset::perm(int64_t epoch) {
 
 void Dataset::decode_src(const Rec& r, BatchBuf& b, int si, int sample, int tile, int64_t img_off,
                          int64_t& mask_cursor, std::mutex& mu) {
+  if (r.shard < 0) return decode_teacher(r, b, si, sample, tile, img_off, mask_cursor, mu);
   const uint8_t* p = shards_[r.shard].base + r.off;
   RecHead h = parse_head(p);
   // JPEG → RGB
@@ -232,8 +343,157 @@ void Dataset::decode_src(const Rec& r, BatchBuf& b, int si, int sample, int tile
     in.mx0 = o.x0; in.my0 = o.y0; in.mcw = o.cw; in.mch = o.ch;
     in.wpr = (o.cw + 31) / 32;
     in.mask_off = moff + local_off[j];
+    in.ignore = 0;
   }
   n_inst_total += k;
+}
+
+// 선생 라벨 사진 하나: COCO 사진 + 선생 마스크(점수 ≥ score_thr, 판정 파일이 뺀 것·SigLIP2 ≥ siglip_thr 인 것 제외)
+// + 나눠 살린 COCO 물체 조각 + 무시 영역(ignore 인스턴스 하나).
+void Dataset::decode_teacher(const Rec& r, BatchBuf& b, int si, int sample, int tile, int64_t img_off,
+                             int64_t& mask_cursor, std::mutex& mu) {
+  const TRec& t = trec_[r.off];
+  const int W = t.w, H = t.h;
+  char path[1024];
+  snprintf(path, sizeof path, "%s/%012u.jpg", cfg.images.c_str(), t.id);
+  auto file = read_file(path);
+  thread_local tjhandle tj = tjInitDecompress();
+  int w = 0, hh = 0, sub, cs;
+  bool ok = !file.empty() && tjDecompressHeader3(tj, file.data(), file.size(), &w, &hh, &sub, &cs) == 0 && w == W &&
+            hh == H && tjDecompress2(tj, file.data(), file.size(), b.img + img_off, W, W * 3, H, TJPF_RGB, 0) == 0;
+  if (!ok) {  // JPEG 이 아닌 사진(COCO 에 PNG 1 장): 변환해 둔 PPM
+    snprintf(path, sizeof path, "%s/%012u.ppm", cfg.nonjpeg.c_str(), t.id);
+    file = read_file(path);
+    int pw = 0, ph = 0, mv = 0, off = 0;
+    FSO_ASSERT(!file.empty() && sscanf(reinterpret_cast<const char*>(file.data()), "P6 %d %d %d%n", &pw, &ph, &mv, &off) == 3 &&
+                   pw == W && ph == H && file.size() >= size_t(off + 1) + size_t(W) * H * 3,
+               "image %u", t.id);
+    memcpy(b.img + img_off, file.data() + off + 1, size_t(W) * H * 3);
+  }
+  // 선생 라벨과 판정
+  const uint8_t* fp = ftl_.base + t.ftl;
+  uint16_t n;
+  memcpy(&n, fp + 12, 2);
+  const uint8_t* sa = fp + 16;
+  uint32_t nb;
+  memcpy(&nb, sa + size_t(n) * 8, 4);
+  const uint8_t* lrle = sa + size_t(n) * 8 + 4;
+  const uint8_t* pp = plan_.base + t.plan;
+  uint16_t nd, nc, ne;
+  memcpy(&nd, pp + 8, 2); memcpy(&nc, pp + 10, 2); memcpy(&ne, pp + 12, 2);
+  const uint8_t* q = pp + 16;
+  std::vector<char> keep(n);
+  for (int k = 0; k < n; k++) {
+    float s;
+    memcpy(&s, sa + k * 8, 4);
+    keep[k] = s >= cfg.score_thr;
+  }
+  for (int i = 0; i < nd; i++) {
+    uint16_t k;
+    memcpy(&k, q + 2 * i, 2);
+    keep[k] = 0;
+  }
+  q += 2 * size_t(nd) + 2 * size_t(nc);
+  auto it = siglip_.find(t.id);
+  if (it != siglip_.end())
+    for (auto& [k, pr] : it->second)
+      if (pr >= cfg.siglip_thr) keep[k] = 0;
+  // 후보 정답: 선생 마스크(lab ≥ 0) 또는 RLE(조각, 무시 영역)
+  struct Cand { int lab; const uint8_t* rle; uint32_t len; int x0, y0, x1, y1; int64_t area; int ignore; };
+  std::vector<Cand> cands;
+  std::vector<int> lab2c(n, -1);
+  for (int k = 0; k < n; k++)
+    if (keep[k]) { lab2c[k] = int(cands.size()); cands.push_back({k, nullptr, 0, W, H, -1, -1, 0, 0}); }
+  // 레이블 지도(값 0 = 없음, k+1) 를 한 번 훑어 상자·넓이
+  {
+    const uint8_t* p = lrle;
+    const uint8_t* e = lrle + nb;
+    int64_t pos = 0;
+    while (p < e) {
+      uint32_t v = leb(p), len = leb(p);
+      if (v > 0 && lab2c[v - 1] >= 0) {
+        Cand& c = cands[lab2c[v - 1]];
+        grow(c.x0, c.y0, c.x1, c.y1, pos, len, W);
+        c.area += len;
+      }
+      pos += len;
+    }
+  }
+  for (int e = 0; e <= ne; e++) {
+    uint32_t ln;
+    memcpy(&ln, q, 4);
+    q += 4;
+    if (ln) {
+      Cand c{-1, q, ln, W, H, -1, -1, 0, e == ne};
+      for_ones(q, ln, [&](int64_t s, int64_t len) { grow(c.x0, c.y0, c.x1, c.y1, s, len, W); c.area += len; });
+      if (c.area > 0) cands.push_back(c);
+    }
+    q += ln;
+  }
+  // 넓이 큰 순, 정답은 상한까지(무시 영역은 늘 넣는다)
+  std::stable_sort(cands.begin(), cands.end(), [](const Cand& x, const Cand& y) {
+    if (x.ignore != y.ignore) return x.ignore < y.ignore;
+    return x.area > y.area;
+  });
+  std::vector<Cand> outs;
+  int nreg = 0;
+  for (auto& c : cands) {
+    if (c.area == 0) continue;
+    if (!c.ignore && nreg >= cfg.max_inst_per_src) continue;
+    nreg += !c.ignore;
+    outs.push_back(c);
+  }
+  // 비트맵
+  std::vector<uint32_t> bits;
+  std::vector<int64_t> local_off(outs.size());
+  std::vector<int> lab2o(n, -1);
+  for (size_t j = 0; j < outs.size(); j++) {
+    auto& o = outs[j];
+    int cw = o.x1 - o.x0 + 1, ch = o.y1 - o.y0 + 1, wpr = (cw + 31) / 32;
+    local_off[j] = int64_t(bits.size());
+    bits.resize(bits.size() + size_t(wpr) * ch, 0u);
+    if (o.lab >= 0) lab2o[o.lab] = int(j);
+    else
+      for_ones(o.rle, o.len, [&](int64_t s, int64_t len) { paint(&bits[local_off[j]], o.x0, o.y0, cw, wpr, s, s + len, W); });
+  }
+  {
+    const uint8_t* p = lrle;
+    const uint8_t* e = lrle + nb;
+    int64_t pos = 0;
+    while (p < e) {
+      uint32_t v = leb(p), len = leb(p);
+      if (v > 0 && lab2o[v - 1] >= 0) {
+        int j = lab2o[v - 1];
+        auto& o = outs[j];
+        int cw = o.x1 - o.x0 + 1;
+        paint(&bits[local_off[j]], o.x0, o.y0, cw, (cw + 31) / 32, pos, pos + len, W);
+      }
+      pos += len;
+    }
+  }
+  // 배치 버퍼에 자리 잡기
+  int64_t moff, i0;
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    moff = mask_cursor;
+    int nn = int(outs.size());
+    if (moff + int64_t(bits.size()) > b.mask_cap || b.hdr->ninst + nn > b.max_inst) { n_dropped_cap += nn; return; }
+    mask_cursor += int64_t(bits.size());
+    i0 = b.hdr->ninst;
+    b.hdr->ninst += nn;
+  }
+  memcpy(b.mask + moff, bits.data(), bits.size() * 4);
+  for (size_t j = 0; j < outs.size(); j++) {
+    auto& o = outs[j];
+    InstInfo& in = b.inst[i0 + int64_t(j)];
+    in.src = si; in.sample = sample; in.tile = tile;
+    in.box[0] = float(o.x0); in.box[1] = float(o.y0); in.box[2] = float(o.x1 + 1); in.box[3] = float(o.y1 + 1);
+    in.mx0 = o.x0; in.my0 = o.y0; in.mcw = o.x1 - o.x0 + 1; in.mch = o.y1 - o.y0 + 1;
+    in.wpr = (in.mcw + 31) / 32;
+    in.mask_off = moff + local_off[j];
+    in.ignore = o.ignore;
+  }
+  n_inst_total += nreg;
 }
 
 // ---------------------------------------------------------------- 배치 하나 채우기
@@ -268,8 +528,8 @@ void Dataset::fill(BatchBuf& b, int64_t bi) {
     for (int t = 0; t < 4; t++) sm.src[t] = -1;
     for (int t = 0; t < ntile; t++) {
       const Rec& r = train_[idx[t]];
-      RecHead h = parse_head(shards_[r.shard].base + r.off);
-      int w = h.iw, hh = h.ih;
+      int w, hh, mw, mh;
+      src_size(r, w, hh, mw, mh);
       int x1a, y1a, x2a, y2a, x1b, y1b;
       if (ntile == 1) {  // mosaic 없음: 캔버스 가운데에 놓는다(RandomPerspective 가 border 없이 받는 것과 같게)
         x1a = (2 * S - w) / 2; y1a = (2 * S - hh) / 2; x2a = x1a + w; y2a = y1a + hh; x1b = 0; y1b = 0;
@@ -288,7 +548,7 @@ void Dataset::fill(BatchBuf& b, int64_t bi) {
       }
       int si = b.hdr->nsrc++;
       SrcInfo& s = b.src[si];
-      s.img_off = img_cursor; s.iw = w; s.ih = hh; s.mw = h.mw; s.mh = h.mh;
+      s.img_off = img_cursor; s.iw = w; s.ih = hh; s.mw = mw; s.mh = mh;
       img_cursor += int64_t(w) * hh * 3;
       FSO_ASSERT(img_cursor <= b.img_cap, "image buffer");
       sm.src[t] = si;

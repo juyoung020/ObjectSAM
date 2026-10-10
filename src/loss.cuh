@@ -20,10 +20,13 @@ struct LossCfg {
 };
 
 // 정답(장치): 영상 b 의 정답 수 n_gt[b], 상자 [B][G][4] xyxy 화소, 마스크 비트 [B][G][Hp*Wp/32] (proto 해상도).
+// ignore: [B][Hp*Wp/32] 무시 영역 비트(없으면 nullptr). 그 안에 중심이 있는 음성 앵커는 점수 손실을 받지 않는다
+// (물체라고도 배경이라고도 가르치지 않음; docs/LABELS.md 3 절).
 struct GtBatch {
   int* n_gt;
   float4* box;
   uint32_t* mask;
+  uint32_t* ignore = nullptr;
 };
 
 // 머리 출력·기울기(장치, NHWC act_t). box[l]: [B,H,W,4·reg_max], cls[l]: [B,H,W,1], coef[l]: [B,H,W,32], proto: [B,Hp,Wp,32]

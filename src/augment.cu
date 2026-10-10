@@ -100,7 +100,7 @@ __global__ void k_targets(BatchBuf d, int S, AugOut o) {
   int n = 0, ninst = d.hdr->ninst;
   for (int k = 0; k < ninst && n < o.G; k++) {
     const InstInfo in = d.inst[k];
-    if (in.sample != i) continue;
+    if (in.sample != i || in.ignore) continue;
     int t = in.tile;
     float dx = float(sm.ta[t][0] - sm.tb[t][0]), dy = float(sm.ta[t][1] - sm.tb[t][1]);
     float x1 = fmaxf(in.box[0] + dx, sm.ta[t][0]), y1 = fmaxf(in.box[1] + dy, sm.ta[t][1]);
@@ -157,6 +157,45 @@ __global__ void k_gtmask(BatchBuf d, int S, AugOut o) {
   }
 }
 
+// 무시 영역 비트(Hp×Wp): 표본마다 무시 인스턴스를 정답 마스크와 같은 규칙으로 옮긴다. 블록 하나 = 표본 하나.
+__global__ void k_ignore(BatchBuf d, int S, AugOut o) {
+  int i = blockIdx.x;
+  const SampleInfo sm = d.smp[i];
+  int ninst = d.hdr->ninst, words = o.Hp * o.Wp / 32;
+  float cs = float(S) / o.Wp;
+  uint32_t* dst = o.gt.ignore + int64_t(i) * words;
+  for (int k = 0; k < ninst; k++) {
+    const InstInfo in = d.inst[k];
+    if (in.sample != i || !in.ignore) continue;
+    const SrcInfo si = d.src[in.src];
+    int t = in.tile;
+    float dx = float(sm.ta[t][0] - sm.tb[t][0]), dy = float(sm.ta[t][1] - sm.tb[t][1]);
+    float x1 = fmaxf(in.box[0] + dx, sm.ta[t][0]), y1 = fmaxf(in.box[1] + dy, sm.ta[t][1]);
+    float x2 = fminf(in.box[2] + dx, sm.ta[t][2]), y2 = fminf(in.box[3] + dy, sm.ta[t][3]);
+    if (x2 <= x1 || y2 <= y1) continue;
+    float X1 = fminf(fmaxf(sm.s * x1 + sm.tx, 0.f), float(S)), X2 = fminf(fmaxf(sm.s * x2 + sm.tx, 0.f), float(S));
+    float Y1 = fminf(fmaxf(sm.s * y1 + sm.ty, 0.f), float(S)), Y2 = fminf(fmaxf(sm.s * y2 + sm.ty, 0.f), float(S));
+    if (sm.flip) { float a = S - X2, b = S - X1; X1 = a; X2 = b; }
+    int c0 = max(0, int(floorf(X1 / cs)) - 1), c1 = min(o.Wp, int(ceilf(X2 / cs)) + 1);
+    int r0 = max(0, int(floorf(Y1 / cs)) - 1), r1 = min(o.Hp, int(ceilf(Y2 / cs)) + 1);
+    float kx = float(si.mw) / si.iw, ky = float(si.mh) / si.ih;
+    for (int q = threadIdx.x; q < (c1 - c0) * (r1 - r0); q += blockDim.x) {
+      int r = r0 + q / (c1 - c0), c = c0 + q % (c1 - c0);
+      float x = (c + 0.5f) * cs - 0.5f, y = (r + 0.5f) * cs - 0.5f;
+      float xs = sm.flip ? S - 1 - x : x;
+      float u = (xs - sm.tx) / sm.s, v = (y - sm.ty) / sm.s;
+      if (u < sm.ta[t][0] || u >= sm.ta[t][2] || v < sm.ta[t][1] || v >= sm.ta[t][3]) continue;
+      float sx = u - sm.ta[t][0] + sm.tb[t][0], sy = v - sm.ta[t][1] + sm.tb[t][1];
+      int mx = int(floorf((sx + 0.5f) * kx)) - in.mx0, my = int(floorf((sy + 0.5f) * ky)) - in.my0;
+      if (mx < 0 || my < 0 || mx >= in.mcw || my >= in.mch) continue;
+      if (d.mask[in.mask_off + int64_t(my) * in.wpr + (mx >> 5)] >> (mx & 31) & 1u) {
+        int64_t bit = int64_t(r) * o.Wp + c;
+        atomicOr(&dst[bit >> 5], 1u << (bit & 31));
+      }
+    }
+  }
+}
+
 }  // namespace
 
 void augment(const BatchBuf& dev, int B, int S, const AugOut& o, cudaStream_t st) {
@@ -164,4 +203,8 @@ void augment(const BatchBuf& dev, int B, int S, const AugOut& o, cudaStream_t st
   k_image<<<dim3(cdiv(int64_t(S) * S, kT), B), kT, 0, st>>>(dev, S, o.img);
   k_targets<<<B, 32, 0, st>>>(dev, S, o);
   k_gtmask<<<dim3(o.G, B), 128, 0, st>>>(dev, S, o);
+  if (o.gt.ignore) {
+    CUDA_CHECK(cudaMemsetAsync(o.gt.ignore, 0, size_t(B) * o.Hp * o.Wp / 8, st));
+    k_ignore<<<B, 256, 0, st>>>(dev, S, o);
+  }
 }

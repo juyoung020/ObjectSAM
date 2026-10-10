@@ -37,6 +37,9 @@ struct Args {
   int64_t max_steps = -1;   // 시험용: 이만큼 하고 멈춤
   uint64_t seed = 0;
   float mosaic = 1.f;
+  // 선생 라벨에서 바로(docs/LABELS.md). teacher 가 있으면 --shards 대신.
+  std::string teacher, plan, siglip, exclude = "data/coco_shards/val_image_ids.json";
+  float score_thr = 0.5f, siglip_thr = 0.8f;
 };
 
 Args parse(int argc, char** argv) {
@@ -60,6 +63,12 @@ Args parse(int argc, char** argv) {
     else if (k == "--max-steps") a.max_steps = std::stoll(v());
     else if (k == "--seed") a.seed = std::stoull(v());
     else if (k == "--mosaic") a.mosaic = std::stof(v());
+    else if (k == "--teacher") a.teacher = v();
+    else if (k == "--plan") a.plan = v();
+    else if (k == "--siglip") a.siglip = v();
+    else if (k == "--exclude") a.exclude = v();
+    else if (k == "--score-thr") a.score_thr = std::stof(v());
+    else if (k == "--siglip-thr") a.siglip_thr = std::stof(v());
     else FSO_ASSERT(false, "unknown arg %s", k.c_str());
   }
   return a;
@@ -103,8 +112,8 @@ int main(int argc, char** argv) {
   signal(SIGINT, on_sig);
   signal(SIGTERM, on_sig);
   std::filesystem::create_directories(a.out);
-  auto shards = glob_files(a.shards);
-  FSO_ASSERT(!shards.empty(), "no shards: %s", a.shards.c_str());
+  auto shards = a.teacher.empty() ? glob_files(a.shards) : std::vector<std::string>{};
+  FSO_ASSERT(!a.teacher.empty() || !shards.empty(), "no shards: %s", a.shards.c_str());
   const int B = a.batch, S = a.imgsz;
 
   cudaStream_t cs, xs;  // 계산, 복사
@@ -118,6 +127,8 @@ int main(int argc, char** argv) {
   DataCfg dc;
   dc.shards = shards;
   dc.batch = B; dc.imgsz = S; dc.workers = a.workers; dc.seed = a.seed; dc.mosaic = a.mosaic;
+  dc.teacher_ftl = a.teacher; dc.teacher_plan = a.plan; dc.teacher_siglip = a.siglip; dc.exclude_ids = a.exclude;
+  dc.score_thr = a.score_thr; dc.siglip_thr = a.siglip_thr;
   Dataset ds;
   ds.open(dc);
   const int64_t nb = ds.batches_per_epoch();
@@ -169,6 +180,7 @@ int main(int argc, char** argv) {
   ao.gt.n_gt = dalloc<int>(B);
   ao.gt.box = dalloc<float4>(B * a.G);
   ao.gt.mask = dalloc<uint32_t>(int64_t(B) * a.G * lc.Hp * lc.Wp / 32);
+  ao.gt.ignore = dalloc<uint32_t>(int64_t(B) * lc.Hp * lc.Wp / 32);
   ao.gt_inst = dalloc<int>(B * a.G);
   HeadIO io;
   for (int l = 0; l < 3; l++) {
