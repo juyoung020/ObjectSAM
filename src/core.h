@@ -1,7 +1,6 @@
 // 공통: 오류 검사, 정밀도(활성값 형), 장치 버퍼.
 #pragma once
 #include <cuda_runtime.h>
-#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cudnn.h>
 
@@ -38,24 +37,19 @@
   } while (0)
 
 // 활성값·conv 입출력 형. 학습은 fp16(+동적 loss scaling, Ultralytics AMP 와 같음), 정합성 시험은 fp32(-DFSO_FP32).
-// bf16(-DFSO_BF16)은 가수 7비트라 BN 직전 conv 출력의 정밀도가 모자라 쓰지 않는다(PyTorch bf16 AMP 도 같은 오차).
+// (bf16 은 가수 7 비트라 BN 직전 conv 출력 정밀도가 모자라 쓰지 않는다 — PyTorch bf16 AMP 도 같은 오차.)
 #if defined(FSO_FP32)
 using act_t = float;
 constexpr cudnnDataType_t kActDnn = CUDNN_DATA_FLOAT;
-#elif defined(FSO_BF16)
-using act_t = __nv_bfloat16;
-constexpr cudnnDataType_t kActDnn = CUDNN_DATA_BFLOAT16;
 #else
 using act_t = __half;
 constexpr cudnnDataType_t kActDnn = CUDNN_DATA_HALF;
 #endif
 
 __host__ __device__ inline float to_f(float x) { return x; }
-__host__ __device__ inline float to_f(__nv_bfloat16 x) { return __bfloat162float(x); }
 __host__ __device__ inline float to_f(__half x) { return __half2float(x); }
 template <class T> __host__ __device__ inline T from_f(float x);
 template <> __host__ __device__ inline float from_f<float>(float x) { return x; }
-template <> __host__ __device__ inline __nv_bfloat16 from_f<__nv_bfloat16>(float x) { return __float2bfloat16(x); }
 template <> __host__ __device__ inline __half from_f<__half>(float x) { return __float2half(x); }
 
 // 장치 메모리: 시작할 때 한 번 잡고 학습 중에는 할당하지 않는다.

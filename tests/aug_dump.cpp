@@ -8,7 +8,6 @@ int main(int argc, char** argv) {
   DataCfg dc;
   for (int i = 2; i < argc; i++) dc.shards.push_back(argv[i]);
   dc.batch = 8;
-  dc.hold_per_shard = 0;
   dc.seed = 1;
   Dataset ds;
   ds.open(dc);

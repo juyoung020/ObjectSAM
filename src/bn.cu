@@ -29,17 +29,6 @@ __device__ __forceinline__ void st8(__half* p, const float o[8]) {
   for (int i = 0; i < 4; i++) h[i] = __floats2half2_rn(o[2 * i], o[2 * i + 1]);
   *reinterpret_cast<uint4*>(p) = u;
 }
-__device__ __forceinline__ void ld8(const __nv_bfloat16* p, float o[8]) {
-  uint4 u = *reinterpret_cast<const uint4*>(p);
-  const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&u);
-  for (int i = 0; i < 4; i++) { float2 f = __bfloat1622float2(h[i]); o[2 * i] = f.x; o[2 * i + 1] = f.y; }
-}
-__device__ __forceinline__ void st8(__nv_bfloat16* p, const float o[8]) {
-  uint4 u;
-  __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&u);
-  for (int i = 0; i < 4; i++) h[i] = __floats2bfloat162_rn(o[2 * i], o[2 * i + 1]);
-  *reinterpret_cast<uint4*>(p) = u;
-}
 __device__ __forceinline__ void ld8f(const float* p, float o[8]) { ld8(p, o); }
 
 __device__ __forceinline__ float sigm(float y) { return 1.f / (1.f + __expf(-y)); }

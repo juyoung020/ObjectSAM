@@ -36,9 +36,7 @@ struct Args {
   bool cos_lr = false;
   int64_t max_steps = -1;   // 시험용: 이만큼 하고 멈춤
   uint64_t seed = 0;
-  uint32_t bg = 0x7;
   float mosaic = 1.f;
-  int64_t train_limit = 0;
 };
 
 Args parse(int argc, char** argv) {
@@ -61,9 +59,7 @@ Args parse(int argc, char** argv) {
     else if (k == "--cos-lr") a.cos_lr = true;
     else if (k == "--max-steps") a.max_steps = std::stoll(v());
     else if (k == "--seed") a.seed = std::stoull(v());
-    else if (k == "--bg") a.bg = uint32_t(std::stoul(v(), nullptr, 0));
     else if (k == "--mosaic") a.mosaic = std::stof(v());
-    else if (k == "--train-limit") a.train_limit = std::stoll(v());
     else FSO_ASSERT(false, "unknown arg %s", k.c_str());
   }
   return a;
@@ -121,8 +117,7 @@ int main(int argc, char** argv) {
   // ---- 데이터
   DataCfg dc;
   dc.shards = shards;
-  dc.batch = B; dc.imgsz = S; dc.workers = a.workers; dc.seed = a.seed; dc.bg_groups = a.bg; dc.mosaic = a.mosaic;
-  dc.train_limit = a.train_limit;
+  dc.batch = B; dc.imgsz = S; dc.workers = a.workers; dc.seed = a.seed; dc.mosaic = a.mosaic;
   Dataset ds;
   ds.open(dc);
   const int64_t nb = ds.batches_per_epoch();

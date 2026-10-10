@@ -28,7 +28,7 @@ struct RecHead {
 };
 
 RecHead parse_head(const uint8_t* p) {
-  FSO_ASSERT(!memcmp(p, "FSR2", 4), "bad record magic");
+  FSO_ASSERT(!memcmp(p, "FSR3", 4), "bad record magic (FSR3 expected)");
   p += 4;
   RecHead h;
   h.iw = rd<uint16_t>(p); h.ih = rd<uint16_t>(p); h.mw = rd<uint16_t>(p); h.mh = rd<uint16_t>(p);
@@ -40,25 +40,15 @@ RecHead parse_head(const uint8_t* p) {
   return h;
 }
 
-// 마스크 항목 하나 읽기(포인터를 다음 항목으로)
+// 마스크 항목 하나 읽기(포인터를 다음 항목으로): f32 상자 xyxy(영상 화소), u32 RLE 바이트 수, RLE
 struct MaskEnt {
   float box[4];
-  uint32_t area;
-  uint8_t frac[5];
-  int np;
-  const uint16_t* parents;  // 정렬 안 됨일 수 있어 memcpy 로 읽는다
   uint32_t rle_len;
   const uint8_t* rle;
 };
 MaskEnt next_mask(const uint8_t*& p) {
   MaskEnt m;
   for (float& b : m.box) b = rd<float>(p);
-  m.area = rd<uint32_t>(p);
-  memcpy(m.frac, p, 5);
-  p += 6;
-  m.np = rd<uint16_t>(p);
-  m.parents = reinterpret_cast<const uint16_t*>(p);
-  p += 2 * m.np;
   m.rle_len = rd<uint32_t>(p);
   m.rle = p;
   p += m.rle_len;
@@ -158,14 +148,10 @@ void Dataset::open(const DataCfg& c) {
     f.seekg(0);
     f.read(reinterpret_cast<char*>(off.data()), n * 8);
     FSO_ASSERT(off.back() == sh.len, "%s: idx/bin size mismatch", bin.c_str());
-    size_t nrec = n - 1, ho = std::min<size_t>(c.hold_per_shard, nrec / 10);
-    for (size_t i = 0; i < nrec; i++)
-      (i + ho >= nrec ? val_ : train_).push_back({int(si), int64_t(off[i]), int64_t(off[i + 1] - off[i])});
+    for (size_t i = 0; i + 1 < n; i++) train_.push_back({int(si), int64_t(off[i]), int64_t(off[i + 1] - off[i])});
     shards_.push_back(sh);
   }
-  if (c.train_limit > 0 && int64_t(train_.size()) > c.train_limit) train_.resize(c.train_limit);
-  printf("dataset: %zu shards, %zu train, %zu held out, %ld batches/epoch\n", shards_.size(), train_.size(),
-         val_.size(), batches_per_epoch());
+  printf("dataset: %zu shards, %zu images, %ld batches/epoch\n", shards_.size(), train_.size(), batches_per_epoch());
 }
 
 std::vector<int64_t> Dataset::perm(int64_t epoch) {
@@ -189,30 +175,11 @@ void Dataset::decode_src(const Rec& r, BatchBuf& b, int si, int sample, int tile
   FSO_ASSERT(w == h.iw && hh == h.ih, "jpeg size %dx%d vs %dx%d", w, hh, h.iw, h.ih);
   FSO_ASSERT(tjDecompress2(tj, h.jpeg, h.jpeg_len, b.img + img_off, w, w * 3, hh, TJPF_RGB, 0) == 0, "jpeg decode: %s",
              tjGetErrorStr2(tj));
-  // 규칙: 배경 그룹 비율 합 ≥ bg_frac → 버림; 남긴 더 큰 마스크 안 80 % 이상(부모) → 부분으로 버림(문·창·계단 빼고)
+  // 정답 마스크(배경은 변환할 때 이미 뺐다), 넓이 큰 순으로 저장돼 있어 앞에서 상한까지
   const uint8_t* q = h.masks;
-  std::vector<uint8_t> kept(h.n, 0);
   struct Out { MaskEnt e; int x0, y0, cw, ch; };
   std::vector<Out> outs;
-  int bgthr = int(cfg.bg_frac * 255.f + 0.5f), dwsthr = int(cfg.dws_frac * 255.f + 0.5f);
-  for (int i = 0; i < h.n; i++) {
-    MaskEnt e = next_mask(q);
-    int bg = 0;
-    for (int g = 0; g < 4; g++)
-      if (cfg.bg_groups >> g & 1) bg += e.frac[g];
-    if (bg >= bgthr) continue;
-    if (e.frac[4] < dwsthr) {
-      bool part = false;
-      for (int k = 0; k < e.np && !part; k++) {
-        uint16_t par;
-        memcpy(&par, e.parents + k, 2);
-        part = kept[par];
-      }
-      if (part) continue;
-    }
-    kept[i] = 1;
-    if (int(outs.size()) < cfg.max_inst_per_src) outs.push_back({e, 0, 0, 0, 0});
-  }
+  for (int i = 0; i < h.n && int(outs.size()) < cfg.max_inst_per_src; i++) outs.push_back({next_mask(q), 0, 0, 0, 0});
   // 마스크 상자(RLE 에서 정확히) → 상자 영역 비트맵
   std::vector<uint32_t> bits;
   std::vector<int64_t> local_off;

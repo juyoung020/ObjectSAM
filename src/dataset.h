@@ -1,4 +1,4 @@
-// 학습 데이터: FSR2 샤드(pytools/sa1b_build.py) → 배치 준비(CPU 스레드) → pinned 버퍼.
+// 학습 데이터: FSR3 샤드(정답 마스크·상자만, 변환기가 배경을 이미 뺐다) → 배치 준비(CPU 스레드) → pinned 버퍼.
 //
 // 배치마다 출력 영상 B 장, 장마다 원본 4 장 mosaic(Ultralytics Mosaic + RandomPerspective 와 같은 난수 규칙).
 // CPU 는 원본 디코딩(JPEG→RGB, RLE→상자 영역 비트맵)과 난수 매개변수만 만든다. 화소 일은 GPU(augment.cu).
@@ -48,10 +48,6 @@ struct DataCfg {
   std::vector<std::string> shards;  // .bin 경로들(.idx 같은 이름)
   int batch = 16, imgsz = 1024;
   int workers = 24;
-  int hold_per_shard = 112;         // 샤드마다 마지막 N 장은 검증용(20 샤드 × 112 = 2,240 ≈ 1 %; pytools/sa1b_val.py 와 같은 규칙)
-  int64_t train_limit = 0;          // > 0 이면 학습 영상을 앞에서 이만큼만(탐색 실험용; 검증셋은 그대로)
-  uint32_t bg_groups = 0x7;         // 배경 그룹 비트: 0 실내 구조물, 1 실외 땅, 2 하늘 (3 물은 물체 — 로봇이 피해야 함)
-  float bg_frac = 0.5f, dws_frac = 0.5f;
   int max_inst_per_src = 256;       // 원본 한 장에서 쓰는 정답 수 상한(넓이 큰 순)
   float mosaic = 1.f, scale = 0.5f, translate = 0.1f, fliplr = 0.5f;
   float hsv_h = 0.015f, hsv_s = 0.7f, hsv_v = 0.4f;
@@ -95,7 +91,7 @@ class Dataset {
   struct Rec { int shard; int64_t off, len; };
   struct Shard { const uint8_t* base = nullptr; size_t len = 0; int fd = -1; };
   std::vector<Shard> shards_;
-  std::vector<Rec> train_, val_;
+  std::vector<Rec> train_;
   // 배치 준비
   void fill(BatchBuf& b, int64_t batch_index);
   void decode_src(const Rec& r, BatchBuf& b, int si, int sample, int tile, int64_t img_off, int64_t& mask_cursor,
