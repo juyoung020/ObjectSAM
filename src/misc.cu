@@ -142,3 +142,12 @@ void act_accum_f32(const act_t* s, float* d, int64_t n, bool accum, cudaStream_t
   k_act_accum<<<grid_for(n), kT, 0, st>>>(s, d, n, accum);
 }
 void fill_f32(float* p, float v, int64_t n, cudaStream_t st) { k_fill<<<grid_for(n), kT, 0, st>>>(p, v, n); }
+
+namespace {
+__global__ void k_accum_items(const float* src, float* acc, int n) {
+  int i = threadIdx.x;
+  if (i < n) acc[i] += src[i];
+  if (i == 0) acc[n] += 1.f;
+}
+}  // namespace
+void accum_items(const float* src, float* acc, int n, cudaStream_t st) { k_accum_items<<<1, 32, 0, st>>>(src, acc, n); }

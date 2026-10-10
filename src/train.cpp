@@ -20,6 +20,7 @@
 
 #include "augment.cuh"
 #include "loss.cuh"
+#include "misc.cuh"
 #include "model.h"
 #include "optim.cuh"
 
@@ -173,7 +174,7 @@ int main(int argc, char** argv) {
   // ---- 장치 배치 슬롯 둘과 증강 출력
   ds.set_epoch(ni0);  // 배치 번호 = 반복 번호
   ds.start(4);
-  BatchBuf dev[2];
+  BatchBuf dev[4];
   AugOut ao;
   ao.G = a.G; ao.Hp = lc.Hp; ao.Wp = lc.Wp;
   ao.img = m.input()->p;
@@ -190,8 +191,10 @@ int main(int argc, char** argv) {
   io.proto = m.proto()->p; io.dproto = m.proto()->g;
   m.print_plan();
 
-  // ---- graph: [슬롯 s][누적 여부] 마이크로 스텝, 그리고 옵티마이저 스텝
-  cudaGraphExec_t g_step[2][2] = {}, g_opt = nullptr;
+  // ---- graph: 옵티마이저 스텝 하나(마이크로 배치 L 개 + 옵티마이저 + 손실 기록 합)를 graph 하나로.
+  // 장치 입력 슬롯 4 개: 이번 스텝의 배치 둘을 쓰는 동안 다음 스텝의 배치 둘을 복사한다.
+  constexpr int kSlots = 4;
+  std::map<int, cudaGraphExec_t> g_group;  // 키: 시작 슬롯·길이·옵티마이저 여부
   auto capture = [&](auto body) {
     cudaGraph_t g;
     cudaGraphExec_t e;
@@ -202,31 +205,30 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaGraphDestroy(g));
     return e;
   };
+  float* logacc = dalloc<float>(8);  // 손실 items[0..5] 합, [6] 마이크로 배치 수
+  CUDA_CHECK(cudaMemset(logacc, 0, 8 * sizeof(float)));
   auto micro = [&](int s, bool accum) {
     augment(dev[s], B, S, ao, cs);
     m.forward(true);
     sl.run(io, ao.gt, opt.scale(), cs);
     m.backward(accum);
     opt.tick(cs);
+    accum_items(sl.items(), logacc, 6, cs);
   };
 
-  // ---- 손실 기록(pinned 고리)
-  constexpr int kRing = 64;
-  float* ring;
-  CUDA_CHECK(cudaHostAlloc(&ring, kRing * 16 * sizeof(float), cudaHostAllocDefault));
+  // ---- 기록
+  float* logh;
+  CUDA_CHECK(cudaHostAlloc(&logh, 8 * sizeof(float), cudaHostAllocDefault));
   OptState* ost;
   CUDA_CHECK(cudaHostAlloc(&ost, sizeof(OptState), cudaHostAllocDefault));
-  cudaEvent_t ev_ring[kRing], ev_copied[2], ev_used[2];
-  for (auto& e : ev_ring) CUDA_CHECK(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));
-  for (int s = 0; s < 2; s++) {
-    CUDA_CHECK(cudaEventCreateWithFlags(&ev_copied[s], cudaEventDisableTiming));
-    CUDA_CHECK(cudaEventCreateWithFlags(&ev_used[s], cudaEventDisableTiming));
+  cudaEvent_t ev_copied[kSlots], ev_used[kSlots];
+  for (int k = 0; k < kSlots; k++) {
+    CUDA_CHECK(cudaEventCreateWithFlags(&ev_copied[k], cudaEventDisableTiming));
+    CUDA_CHECK(cudaEventCreateWithFlags(&ev_used[k], cudaEventDisableTiming));
   }
   FILE* flog = fopen((a.out + "/train.log").c_str(), "a");
-  double acc[6] = {0, 0, 0, 0, 0, 0};
-  int nacc = 0;
 
-  auto save_ckpt = [&](const std::string& path, int64_t ni_done) {
+  auto save_ckpt = [&](const std::string& path, int64_t ni_done, int epoch_done = -1) {
     CUDA_CHECK(cudaStreamSynchronize(cs));
     TensorMap T = m.params.save();
     for (int k = 0; k < P_NKIND; k++) T["ema." + std::to_string(k)] = d2t(opt.ema(k), m.params.size[k]);
@@ -240,83 +242,88 @@ int main(int argc, char** argv) {
     fsow_save(path, T);
     TensorMap E = ema_tensors(m.params, opt);  // 추론·내보내기용(EMA, PyTorch 이름)
     fsow_save(a.out + "/ema_last.fsow", E);
-    if (ni_done % nb == 0) fsow_save(a.out + "/ema_ep" + std::to_string(ni_done / nb) + ".fsow", E);  // epoch 마다(검증용)
+    if (epoch_done > 0) fsow_save(a.out + "/ema_ep" + std::to_string(epoch_done) + ".fsow", E);  // epoch 마다(검증용)
     printf("saved %s (iteration %ld)\n", path.c_str(), ni_done);
   };
 
-  // ---- 학습 고리
+  // ---- 학습 고리: 옵티마이저 스텝 단위
   const int64_t total = a.max_steps > 0 ? std::min<int64_t>(ni0 + a.max_steps, int64_t(a.epochs) * nb)
                                         : int64_t(a.epochs) * nb;
   const int64_t nw = std::llround(std::min(double(a.warmup_epochs), double(std::max(a.epochs - 1, 0))) * nb);
   printf("training: %d epochs × %ld batches (batch %d, nbs 64 → accumulate %d), warmup %ld iterations, lr0 %g\n",
          a.epochs, nb, B, opt.accumulate(), nw, a.lr0);
+  // 누적 수: Ultralytics 와 같이 워밍업 동안 1 → nbs/batch. 이터레이션 ni 에서 ni − last_opt ≥ acc(ni) 이면 스텝.
+  auto acc_at = [&](int64_t i) {
+    double f = i <= nw && nw > 0 ? 1.0 + (64.0 / B - 1.0) * double(i) / double(nw) : 64.0 / B;
+    return std::max(1, int(std::lround(f)));
+  };
   double t0 = now_s(), tlog = t0;
-  int64_t ni = ni0;
-  BatchBuf* host_slot[2] = {nullptr, nullptr};
-  for (; ni < total && !g_stop; ni++) {
-    int s = int(ni & 1);
-    int64_t bi;
-    BatchBuf* hb = ds.acquire(bi);
-    FSO_ASSERT(bi == ni, "batch order %ld vs %ld", bi, ni);
-    if (!dev[s].hdr) dev[s].alloc_dev(*hb);
-    // 슬롯 s 의 앞 배치(ni-2): 그 복사는 이미 끝났다 → pinned 버퍼를 로더에 돌려준다
-    if (host_slot[s]) {
-      CUDA_CHECK(cudaEventSynchronize(ev_copied[s]));
-      ds.release(host_slot[s]);
+  int64_t ni = ni0, next_log = (ni0 / a.log_every + 1) * a.log_every, logged_at = ni0;
+  std::vector<BatchBuf*> host_slot(kSlots, nullptr);
+  while (ni < total && !g_stop) {
+    // 이번 그룹의 길이(마지막 그룹은 짧을 수 있고, 그러면 옵티마이저 스텝 없이 기울기만 쌓는다 — 원래 고리와 같음)
+    int L = 1;
+    while (ni + L - 1 - last_opt < acc_at(ni + L - 1)) L++;
+    bool step = ni + L <= total;
+    if (!step) L = int(total - ni);
+    int s0 = int(ni % kSlots);
+    // 앞 그룹 배치들의 복사가 끝났으면 pinned 버퍼를 로더에 돌려준다(쥐고 있으면 로더 버퍼 4 개가 바닥나 멈춘다)
+    for (int k = 0; k < kSlots; k++)
+      if (host_slot[k]) {
+        CUDA_CHECK(cudaEventSynchronize(ev_copied[k]));
+        ds.release(host_slot[k]);
+        host_slot[k] = nullptr;
+      }
+    for (int k = 0; k < L; k++) {
+      int s = int((ni + k) % kSlots);
+      int64_t bi;
+      BatchBuf* hb = ds.acquire(bi);
+      FSO_ASSERT(bi == ni + k, "batch order %ld vs %ld", bi, ni + k);
+      if (!dev[s].hdr) dev[s].alloc_dev(*hb);
+      host_slot[s] = hb;
+      CUDA_CHECK(cudaStreamWaitEvent(xs, ev_used[s], 0));  // 장치 슬롯이 앞 사용에서 풀렸을 때
+      CUDA_CHECK(cudaMemcpyAsync(dev[s].hdr, hb->hdr, hb->meta_bytes(), cudaMemcpyHostToDevice, xs));
+      CUDA_CHECK(cudaMemcpyAsync(dev[s].img, hb->img, hb->hdr->img_bytes, cudaMemcpyHostToDevice, xs));
+      CUDA_CHECK(cudaMemcpyAsync(dev[s].mask, hb->mask, hb->hdr->mask_words * 4, cudaMemcpyHostToDevice, xs));
+      CUDA_CHECK(cudaEventRecord(ev_copied[s], xs));
+      CUDA_CHECK(cudaStreamWaitEvent(cs, ev_copied[s], 0));
     }
-    host_slot[s] = hb;
-    // 장치 슬롯 s 가 앞 사용(ni-2)에서 풀렸을 때 복사
-    CUDA_CHECK(cudaStreamWaitEvent(xs, ev_used[s], 0));
-    CUDA_CHECK(cudaMemcpyAsync(dev[s].hdr, hb->hdr, hb->meta_bytes(), cudaMemcpyHostToDevice, xs));
-    CUDA_CHECK(cudaMemcpyAsync(dev[s].img, hb->img, hb->hdr->img_bytes, cudaMemcpyHostToDevice, xs));
-    CUDA_CHECK(cudaMemcpyAsync(dev[s].mask, hb->mask, hb->hdr->mask_words * 4, cudaMemcpyHostToDevice, xs));
-    CUDA_CHECK(cudaEventRecord(ev_copied[s], xs));
-    // 누적: Ultralytics 와 같이 워밍업 동안 1 → nbs/batch
-    double accf = ni <= nw && nw > 0 ? 1.0 + (64.0 / B - 1.0) * double(ni) / double(nw) : 64.0 / B;
-    int accumulate = std::max(1, int(std::lround(accf)));
-    bool first = ni - last_opt == 1;  // 옵티마이저 스텝 바로 뒤 첫 마이크로 배치: 기울기를 덮어쓴다
-    bool accum = !first;
-    if (!g_step[s][accum]) g_step[s][accum] = capture([&]() { micro(s, accum); });
-    CUDA_CHECK(cudaStreamWaitEvent(cs, ev_copied[s], 0));
-    CUDA_CHECK(cudaGraphLaunch(g_step[s][accum], cs));
-    CUDA_CHECK(cudaEventRecord(ev_used[s], cs));
-    if (ni - last_opt >= accumulate) {
-      if (!g_opt) g_opt = capture([&]() { opt.step(cs); });
-      CUDA_CHECK(cudaGraphLaunch(g_opt, cs));
-      last_opt = ni;
-    }
-    int r = int(ni % kRing);
-    CUDA_CHECK(cudaMemcpyAsync(ring + r * 16, sl.items(), 16 * sizeof(float), cudaMemcpyDeviceToHost, cs));
-    CUDA_CHECK(cudaEventRecord(ev_ring[r], cs));
-    // 몇 스텝 전 값 모으기(이미 끝났으면 기다리지 않음)
-    int64_t back = ni - 8;
-    if (back >= ni0) {
-      int rb = int(back % kRing);
-      CUDA_CHECK(cudaEventSynchronize(ev_ring[rb]));
-      for (int k = 0; k < 6; k++) acc[k] += ring[rb * 16 + k];
-      nacc++;
-    }
-    if ((ni + 1) % a.log_every == 0 && nacc) {
+    int key = (s0 * 8 + L) * 2 + step;
+    bool first = ni - last_opt == 1;  // 옵티마이저 스텝 바로 뒤: 첫 마이크로 배치가 기울기를 덮어쓴다
+    FSO_ASSERT(first, "group must start right after an optimizer step");
+    if (!g_group.count(key))
+      g_group[key] = capture([&]() {
+        for (int k = 0; k < L; k++) micro(int((s0 + k) % kSlots), k > 0);
+        if (step) opt.step(cs);
+      });
+    CUDA_CHECK(cudaGraphLaunch(g_group[key], cs));
+    for (int k = 0; k < L; k++) CUDA_CHECK(cudaEventRecord(ev_used[(s0 + k) % kSlots], cs));
+    ni += L;
+    if (step) last_opt = ni - 1;
+    if (ni >= next_log) {
+      CUDA_CHECK(cudaMemcpyAsync(logh, logacc, 8 * sizeof(float), cudaMemcpyDeviceToHost, cs));
       CUDA_CHECK(cudaMemcpyAsync(ost, opt.state(), sizeof(OptState), cudaMemcpyDeviceToHost, cs));
+      CUDA_CHECK(cudaMemsetAsync(logacc, 0, 8 * sizeof(float), cs));
       CUDA_CHECK(cudaStreamSynchronize(cs));
       double t = now_s();
-      double ips = a.log_every * B / (t - tlog);
+      double ips = double(ni - logged_at) * B / (t - tlog);
       tlog = t;
-      double eta = (total - ni - 1) * B / ips / 3600.0;
+      double eta = (total - ni) * B / ips / 3600.0;
+      float n = std::max(logh[6], 1.f);
       char line[512];
       snprintf(line, sizeof(line),
                "ep %ld it %ld/%ld | box %.4f seg %.4f cls %.4f dfl %.4f | fg %.0f | lr %.5f mom %.3f scale %.0f skip %ld "
                "norm %.2f | %.1f img/s, data wait %.1f ms/it, eta %.2f h",
-               ni / nb, ni + 1, total, acc[0] / nacc, acc[1] / nacc, acc[2] / nacc, acc[3] / nacc, acc[4] / nacc,
-               ost->lr[0], ost->mom, ost->scale, ost->skipped, ost->grad_norm, ips, ds.wait_ms / a.log_every, eta);
+               (ni - 1) / nb, ni, total, logh[0] / n, logh[1] / n, logh[2] / n, logh[3] / n, logh[4] / n, ost->lr[0],
+               ost->mom, ost->scale, ost->skipped, ost->grad_norm, ips, ds.wait_ms / double(ni - logged_at), eta);
       ds.wait_ms = 0;
+      logged_at = ni;
+      next_log = (ni / a.log_every + 1) * a.log_every;
       puts(line);
       fflush(stdout);
       if (flog) { fprintf(flog, "%s\n", line); fflush(flog); }
-      for (auto& x : acc) x = 0;
-      nacc = 0;
     }
-    if ((ni + 1) % nb == 0) save_ckpt(a.out + "/last.fsow", ni + 1);
+    if (ni / nb != (ni - L) / nb) save_ckpt(a.out + "/last.fsow", ni, int(ni / nb));  // epoch 경계를 넘은 그룹 뒤
   }
   if (ni != ni0) save_ckpt(a.out + "/last.fsow", ni);
   ds.stop();

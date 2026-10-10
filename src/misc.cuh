@@ -20,3 +20,5 @@ void add_bias(act_t* y, int64_t M, int C, const float* bias, cudaStream_t st);
 void f32_to_act(const float* src, act_t* dst, int64_t n, cudaStream_t st);
 void act_accum_f32(const act_t* src, float* dst, int64_t n, bool accum, cudaStream_t st);
 void fill_f32(float* p, float v, int64_t n, cudaStream_t st);
+// acc[0..n) += src[0..n), acc[n] += 1 (학습 로그용 손실 합을 장치에서 모은다 — graph 안에서 호스트 왕복 없이)
+void accum_items(const float* src, float* acc, int n, cudaStream_t st);
