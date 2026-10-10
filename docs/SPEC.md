@@ -106,4 +106,7 @@ grass-merged, dirt-merged, paper-merged, food-other-merged, building-other-merge
 
 ## 7. 산출물
 
-- **미정** 내보내기 형식(.pt, ONNX, TensorRT)과 공개 여부.
+- **결정** 산출물: ONNX(배포용 표준, ovdet 등이 받아 TensorRT 로 빌드) + .pt(Python·Ultralytics 용).
+  TensorRT 엔진은 GPU·TensorRT 판마다 달라 배포하지 않고, 쓸 기기에서 ONNX 로 빌드하는 방법만 문서에 적는다.
+  출력 모양은 FastSAM-s 와 같게(기존 후처리 그대로 쓰기).
+- **미정** 공개 여부(GitHub).
