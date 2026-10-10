@@ -112,14 +112,27 @@ def main():
         base[0] += drop
 
     probs, base = [], [0]
+    def bounded(pool, it, window):
+        """pool.map 은 작업을 한꺼번에 넣어 결과가 GPU 보다 빨리 쌓인다(메모리 부족) → 처리 중인 작업 수를 제한."""
+        from collections import deque
+        q = deque()
+        for j in it:
+            q.append(pool.submit(crops_for, j))
+            if len(q) >= window:
+                yield q.popleft().result()
+        while q:
+            yield q.popleft().result()
+
     with ProcessPoolExecutor(a.workers) as pool:
-        for iid, cand, crops in pool.map(crops_for, jobs, chunksize=8):
+        for iid, cand, crops in bounded(pool, jobs, 4 * a.workers):
             s = ncrop
             ncrop += len(cand)
             pending.append((iid, cand, s, ncrop))
             buf.extend(list(crops))
+            before = done
             flush()
-            if done and done % 2000 == 0:
+            if done // 2000 != before // 2000:
+                f.flush()
                 el = time.time() - t0
                 print(f'{done} images, {ncrop} crops, {ncrop / el:.1f} crops/s, eta {(558576 - ncrop) / (ncrop / el) / 3600:.1f} h',
                       flush=True)
