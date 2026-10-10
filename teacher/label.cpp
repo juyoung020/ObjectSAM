@@ -236,8 +236,17 @@ int main(int argc, char** argv) {
         std::ifstream f(todo[k].path, std::ios::binary);
         jpg.assign(std::istreambuf_iterator<char>(f), {});
         int w_ = 0, h_ = 0, ss = 0, cs = 0;
-        bool fail = jpg.empty() || tjDecompressHeader3(tj, jpg.data(), jpg.size(), &w_, &h_, &ss, &cs) != 0;
-        if (!fail) {
+        bool ppm = jpg.size() > 2 && jpg[0] == 'P' && jpg[1] == '6';  // JPEG 이 아닌 사진(COCO 에 PNG 1 장)은 PPM 으로 바꿔 넣는다
+        bool fail = false;
+        if (ppm) {
+          int maxv = 0, off = 0;
+          fail = sscanf(reinterpret_cast<const char*>(jpg.data()), "P6 %d %d %d%n", &w_, &h_, &maxv, &off) != 3 || maxv != 255 ||
+                 jpg.size() < size_t(off + 1) + size_t(w_) * h_ * 3;
+          if (!fail) rgb.assign(jpg.begin() + off + 1, jpg.begin() + off + 1 + size_t(w_) * h_ * 3);
+        } else {
+          fail = jpg.empty() || tjDecompressHeader3(tj, jpg.data(), jpg.size(), &w_, &h_, &ss, &cs) != 0;
+        }
+        if (!fail && !ppm) {
           rgb.resize(size_t(w_) * h_ * 3);
           fail = tjDecompress2(tj, jpg.data(), jpg.size(), rgb.data(), w_, 0, h_, TJPF_RGB, 0) != 0;
         }
