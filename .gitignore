@@ -1,0 +1,7 @@
+data/
+weights/
+runs/
+build/
+__pycache__/
+.venv/
+*.tar

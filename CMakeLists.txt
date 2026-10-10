@@ -1,0 +1,36 @@
+cmake_minimum_required(VERSION 3.22)
+set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.8/bin/nvcc)
+project(fastsam_obj LANGUAGES CXX CUDA)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_ARCHITECTURES 120)   # RTX 5070 Ti (Blackwell, sm_120)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+set(CMAKE_CUDA_FLAGS_RELEASE "-O3 --use_fast_math -lineinfo")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native")
+
+find_package(CUDAToolkit REQUIRED)
+set(CORE_SRC src/bn.cu src/misc.cu src/loss.cu src/optim.cu src/augment.cu src/conv.cpp src/model.cpp src/dataset.cpp)
+
+# 학습용 fp16, 정합성 시험용 fp32.
+foreach(prec fp16 fp32)
+  add_library(fso_${prec} STATIC ${CORE_SRC})
+  target_include_directories(fso_${prec} PUBLIC src)
+  target_link_libraries(fso_${prec} PUBLIC CUDA::cudart cudnn turbojpeg pthread)
+  if(prec STREQUAL "fp32")
+    target_compile_definitions(fso_${prec} PUBLIC FSO_FP32)
+  endif()
+  set_target_properties(fso_${prec} PROPERTIES CUDA_SEPARABLE_COMPILATION OFF POSITION_INDEPENDENT_CODE ON)
+
+  add_executable(parity_${prec} tests/parity.cpp)
+  target_link_libraries(parity_${prec} PRIVATE fso_${prec})
+  add_executable(aug_dump_${prec} tests/aug_dump.cpp)
+  target_link_libraries(aug_dump_${prec} PRIVATE fso_${prec})
+  add_executable(bench_train_${prec} tests/bench_train.cpp)
+  target_link_libraries(bench_train_${prec} PRIVATE fso_${prec})
+endforeach()
+
+add_executable(train src/train.cpp)
+target_link_libraries(train PRIVATE fso_fp16)
