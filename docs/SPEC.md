@@ -31,24 +31,28 @@
   - test2017 은 정답이 비공개라 우리 규칙(벽·바닥 제외)으로 채점할 수 없어 쓰지 않는다.
 - **결정** 외부 시험(학습에 안 쓴 데이터, 로봇 실내 일반화 확인): BEHAVIOR 시뮬 집 10 곳, ADE20K 실내 val.
 
-## 4. 라벨 규칙 (COCO panoptic → 정답 마스크)
+## 4. 라벨 규칙: 선생 모델 증류 + COCO 사람 라벨로 구조물 빼기
 
-COCO panoptic 은 모든 화소에 클래스가 있다: 물체(thing) 80 종은 개체마다 마스크, 배경(stuff) 53 종은 클래스마다 한 덩어리.
+COCO 사람 정답만으로는 물체 80 종 밖이 비어 있고, stuff 53 종은 개체 구분 없는 덩어리다(선반 위 물건이 선반에 섞여 칠해짐,
+떨어진 창문 셋이 마스크 하나 — 바탕화면의 예시 그림). 그래서 정답 마스크는 선생 모델로 만든다.
 
-- **결정** 물체 80 종: 개체마다 정답 마스크 하나.
-- **결정** stuff 53 종 중 배경(정답 없음)은 19 종:
+- **결정** 선생: CropFormer Hornet-L(개체 분할, 공개 모델 중 최고). 원본 그대로(화면 다섯 장) C++/CUDA fp16 로 돌린다
+  — [TEACHER.md](TEACHER.md). 학습 사진 118,287 장(검증으로 뗀 5,000 장 포함) 모두.
+- **결정** 선생 결과는 점수와 함께 모두 저장(data/teacher/train2017.ftl)하고, 아래 기준은 결과를 보며 정한다.
+- **미정** 점수 기준(원본 데모는 0.5).
+- **미정** 구조물(벽·천장·바닥·하늘) 빼기: 같은 사진의 COCO panoptic 사람 라벨로 판단. 배경 19 종(아래)을 쓴다.
+  단순히 "마스크의 절반 이상이 배경 화소면 뺀다"로 하면 COCO 가 배경으로 칠한 벽의 액자·스위치, 바닥의 가방까지 빠지므로
+  "배경 영역의 큰 부분을 덮을 때만 뺀다" 같은 보완을 사진으로 확인하고 정한다.
+- 배경 19 종:
   - 벽: wall-brick, wall-stone, wall-tile, wall-wood, wall-other-merged
   - 천장: ceiling-merged
   - 바닥: floor-wood, floor-other-merged, road, pavement-merged, dirt-merged, sand, gravel, snow, grass-merged,
     playingfield, railroad, platform
   - 하늘: sky-other-merged
-- **결정** 나머지 stuff 34 종은 물체(물 river·sea·water-other, 러그 rug-merged 포함). panoptic 에서 stuff 는 사진마다 클래스별 한 덩어리라(창문 셋이 마스크 하나),
-  서로 떨어진 조각(연결 성분)마다 나눠 개체로 쓴다. 맞붙은 것은 하나로 남는다.
-- **결정** iscrowd(개체로 나누지 않고 한 덩어리로 묶은 무리, val 정답의 0.8 %)는 **무시 영역**: 정답으로 쓰지 않고,
-  그 안에 중심이 있는 앵커는 점수 손실을 주지 않는다(맞다·틀리다 모두 가르치지 않음). 그대로 쓰면 "무리 = 마스크 하나"를,
-  그냥 빼면 "무리 속 개체 = 물체 아님"을 배워 개체를 하나하나 찾는 목표와 어긋나기 때문. 증강 때 정답과 같이 옮긴다.
-- **결정** 최소 크기 없음: 로봇이 집는 물체는 작게 보이는 경우가 많아 작은 정답(COCO 정답의 약 40 %)을 모두 쓴다.
-  증강 뒤 상자가 2 화소 이하가 된 정답만 학습기가 자동으로 뺀다(Ultralytics 와 같음).
+- **결정** 최소 크기 없음: 로봇이 집는 물체는 작게 보이는 경우가 많다. 증강 뒤 상자가 2 화소 이하가 된 정답만 학습기가 자동으로
+  뺀다(Ultralytics 와 같음).
+- (이전 안, 쓰지 않음) COCO 정답만: 물체 80 종 + stuff 34 종을 떨어진 조각마다 나눠 정답으로. 위 품질 문제로 바꿨다.
+  변환기 pytools/coco_build.py 는 시험(검증 지표, 구조물 화소)용으로 남긴다.
 
 stuff 53 종: banner, blanket, bridge, cardboard, counter, curtain, door-stuff, floor-wood, flower, fruit, gravel, house,
 light, mirror-stuff, net, pillow, platform, playingfield, railroad, river, road, roof, sand, sea, shelf, snow, stairs, tent,
@@ -58,7 +62,9 @@ grass-merged, dirt-merged, paper-merged, food-other-merged, building-other-merge
 
 ## 5. 학습
 
-- **결정** 처음부터(무작위 초기화) — FastSAM 과 같음.
+- **결정** 출발점은 FastSAM-s 가중치(신경망 같음). SA-1B 에서 배운 "무엇이든 물체로 보는 능력"(README 의 "finds things
+  it was never told about")을 지닌 채 COCO 로 구조물 제외·통째 분할을 배운다. COCO 만으로 처음부터 학습하면 목록 밖 물건을
+  찾는 능력이 약해질 수 있어서. 먼저 짧은 시험 학습으로 확인한다.
 - **결정** 학습기: 이 저장소의 C++/CUDA 학습기, fp16 + 동적 loss scaling, CUDA graph. Ultralytics 와 fp32 정합성 확인됨.
 - **결정** 하이퍼파라미터: FastSAM 과 같은 Ultralytics 기본값 — SGD lr0 0.01, lrf 0.01, momentum 0.937,
   weight decay 5e-4, 워밍업 3 epoch, nbs 64, overlap_mask False, close_mosaic 0, mosaic·scale 0.5·translate 0.1·

@@ -3,13 +3,14 @@
 #include <algorithm>
 
 namespace {
-void nhwc(cudnnTensorDescriptor_t d, int n, int c, int h, int w) {
-  CUDNN_CHECK(cudnnSetTensor4dDescriptor(d, CUDNN_TENSOR_NHWC, kActDnn, n, c, h, w));
+void nhwc(cudnnTensorDescriptor_t d, cudnnDataType_t dt, int n, int c, int h, int w) {
+  CUDNN_CHECK(cudnnSetTensor4dDescriptor(d, CUDNN_TENSOR_NHWC, dt, n, c, h, w));
 }
 }  // namespace
 
-void ConvOp::init(cudnnHandle_t h, const ConvGeom& g, bool transposed) {
+void ConvOp::init(cudnnHandle_t h, const ConvGeom& g, bool transposed, cudnnDataType_t dt) {
   h_ = h;
+  dt_ = dt;
   g_ = g;
   tr_ = transposed;
   CUDNN_CHECK(cudnnCreateTensorDescriptor(&xd_));
@@ -17,25 +18,22 @@ void ConvOp::init(cudnnHandle_t h, const ConvGeom& g, bool transposed) {
   CUDNN_CHECK(cudnnCreateFilterDescriptor(&wd_));
   CUDNN_CHECK(cudnnCreateConvolutionDescriptor(&cd_));
   if (!tr_) {
-    nhwc(xd_, g.N, g.C, g.H, g.W);
-    nhwc(yd_, g.N, g.K, g.P(), g.Q());
-    CUDNN_CHECK(cudnnSetFilter4dDescriptor(wd_, kActDnn, CUDNN_TENSOR_NHWC, g.K, g.C, g.R, g.S));
+    nhwc(xd_, dt_, g.N, g.C, g.H, g.W);
+    nhwc(yd_, dt_, g.N, g.K, g.P(), g.Q());
+    CUDNN_CHECK(cudnnSetFilter4dDescriptor(wd_, dt_, CUDNN_TENSOR_NHWC, g.K, g.C, g.R, g.S));
     CUDNN_CHECK(cudnnSetConvolution2dDescriptor(cd_, g.pad, g.pad, g.stride, g.stride, 1, 1, CUDNN_CROSS_CORRELATION,
                                                 CUDNN_DATA_FLOAT));
   } else {
     FSO_ASSERT(g.pad == 0 && g.R == g.stride && g.S == g.stride, "transposed conv: k == stride only");
     // 내부 conv: big(N, K, H*s, W*s) → small(N, C, H, W), 필터 (C, K, R, S).
-    nhwc(xd_, g.N, g.C, g.H, g.W);                                  // small = 이 층 입력
-    nhwc(yd_, g.N, g.K, g.H * g.stride, g.W * g.stride);            // big = 이 층 출력
-    CUDNN_CHECK(cudnnSetFilter4dDescriptor(wd_, kActDnn, CUDNN_TENSOR_NHWC, g.C, g.K, g.R, g.S));
+    nhwc(xd_, dt_, g.N, g.C, g.H, g.W);                                  // small = 이 층 입력
+    nhwc(yd_, dt_, g.N, g.K, g.H * g.stride, g.W * g.stride);            // big = 이 층 출력
+    CUDNN_CHECK(cudnnSetFilter4dDescriptor(wd_, dt_, CUDNN_TENSOR_NHWC, g.C, g.K, g.R, g.S));
     CUDNN_CHECK(cudnnSetConvolution2dDescriptor(cd_, 0, 0, g.stride, g.stride, 1, 1, CUDNN_CROSS_CORRELATION,
                                                 CUDNN_DATA_FLOAT));
   }
-#ifdef FSO_FP32
-  CUDNN_CHECK(cudnnSetConvolutionMathType(cd_, CUDNN_FMA_MATH));  // 정합성 시험: TF32 금지
-#else
-  CUDNN_CHECK(cudnnSetConvolutionMathType(cd_, CUDNN_TENSOR_OP_MATH));
-#endif
+  // fp32 는 정합성 시험·정밀 경로: TF32 금지
+  CUDNN_CHECK(cudnnSetConvolutionMathType(cd_, dt_ == CUDNN_DATA_FLOAT ? CUDNN_FMA_MATH : CUDNN_TENSOR_OP_MATH));
 }
 
 int64_t ConvOp::out_elems() const {
@@ -85,6 +83,24 @@ size_t ConvOp::tune(act_t* x, act_t* w, act_t* y, act_t* dx, act_t* dw, act_t* d
     tuned_ms[2] = p[i].time;
   }
   return need;
+}
+
+size_t ConvOp::tune_fwd(void* x, void* w, void* y, void* ws, size_t ws_limit) {
+  FSO_ASSERT(!tr_, "tune_fwd: transposed");
+  int n = 0;
+  cudnnConvolutionFwdAlgoPerf_t p[16];
+  CUDNN_CHECK(cudnnFindConvolutionForwardAlgorithmEx(h_, xd_, x, wd_, w, cd_, yd_, y, 16, &n, p, ws, ws_limit));
+  int i = 0;
+  while (i < n && p[i].status != CUDNN_STATUS_SUCCESS) i++;
+  FSO_ASSERT(i < n, "no fwd algo");
+  fa_ = p[i].algo;
+  tuned_ms[0] = p[i].time;
+  return p[i].memory;
+}
+
+void ConvOp::fwd_v(const void* x, const void* w, void* y, void* ws, size_t wsz) const {
+  float a = 1.f, b = 0.f;
+  CUDNN_CHECK(cudnnConvolutionForward(h_, &a, xd_, x, wd_, w, cd_, fa_, ws, wsz, &b, yd_, y));
 }
 
 void ConvOp::fwd(const act_t* x, const act_t* w, act_t* y, void* ws, size_t wsz, float beta) const {

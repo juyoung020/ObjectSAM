@@ -1,0 +1,73 @@
+--- a/mask2former/cropformer_model.py	2026-10-10 20:58:44.109288513 +0900
++++ b/mask2former/cropformer_model.py	2026-10-10 21:03:22.554067427 +0900
+@@ -315,19 +315,9 @@
+             mask_pred_results_2d = outputs_2d["pred_masks"]
+             # upsample masks
+             
+-            mask_pred_results_3d = retry_if_cuda_oom(F.interpolate)(
+-                mask_pred_results_3d,
+-                size=(images.tensor.shape[-2], images.tensor.shape[-1]),
+-                mode="bilinear",
+-                align_corners=False,
+-            )
+-
+-            mask_pred_results_2d = F.interpolate(
+-                mask_pred_results_2d,
+-                size=(images.tensor.shape[-2], images.tensor.shape[-1]),
+-                mode="bilinear",
+-                align_corners=False,
+-            )
++            # [ObjectSAM] 키우기는 inference_whole_views 에서 화면마다 한다(전부 한꺼번에 키우면 약 8 GB).
++            # 2d 결과는 inference_whole_views 가 쓰지 않으므로 키우지 않는다.
++            self._pad_hw = (images.tensor.shape[-2], images.tensor.shape[-1])
+ 
+             del outputs_2d, outputs_3d
+             
+@@ -600,6 +590,7 @@
+ 
+             SO_H, SO_W = image_size_per_view
+ 
++            pred_masks_per_view = F.interpolate(pred_masks_per_view[None], size=self._pad_hw, mode="bilinear", align_corners=False)[0]
+             pred_masks_per_view = pred_masks_per_view[..., : SO_H, :SO_W]
+             pred_masks_per_view = F.interpolate(pred_masks_per_view[None], size=(O_H, O_W), mode="bilinear", align_corners=False)
+ 
+--- a/mask2former/data/datasets/register_entityv2_semseg_150.py	2026-10-10 20:58:44.110288437 +0900
++++ b/mask2former/data/datasets/register_entityv2_semseg_150.py	2026-10-10 21:02:44.597274606 +0900
+@@ -2,7 +2,7 @@
+ import os
+ 
+ from detectron2.data import DatasetCatalog, MetadataCatalog
+-import mmcv
++# import mmcv  (학습 데이터 등록에만 필요, 추론에서 쓰지 않음)
+ 
+ ENTITYV2_SEMSEG150_CATEGORIES = [
+ {'name': 'sky', 'id': 0},
+@@ -160,7 +160,7 @@
+ def load_sem_seg_w_txt(txt_path, image_root, gt_root):
+     """
+     """
+-    infos = mmcv.list_from_file(txt_path)
++    import mmcv; infos = mmcv.list_from_file(txt_path)
+     input_files = []
+     gt_files = []
+     for info in infos:
+--- a/mask2former/modeling/pixel_decoder/ops/src/cuda/ms_deform_attn_cuda.cu	2026-10-10 20:58:44.111288362 +0900
++++ b/mask2former/modeling/pixel_decoder/ops/src/cuda/ms_deform_attn_cuda.cu	2026-10-10 20:59:57.163001206 +0900
+@@ -66,7 +66,7 @@
+     for (int n = 0; n < batch/im2col_step_; ++n)
+     {
+         auto columns = output_n.select(0, n);
+-        AT_DISPATCH_FLOATING_TYPES(value.type(), "ms_deform_attn_forward_cuda", ([&] {
++        AT_DISPATCH_FLOATING_TYPES(value.scalar_type(), "ms_deform_attn_forward_cuda", ([&] {
+             ms_deformable_im2col_cuda(at::cuda::getCurrentCUDAStream(),
+                 value.data<scalar_t>() + n * im2col_step_ * per_value_size,
+                 spatial_shapes.data<int64_t>(),
+@@ -136,7 +136,7 @@
+     for (int n = 0; n < batch/im2col_step_; ++n)
+     {
+         auto grad_output_g = grad_output_n.select(0, n);
+-        AT_DISPATCH_FLOATING_TYPES(value.type(), "ms_deform_attn_backward_cuda", ([&] {
++        AT_DISPATCH_FLOATING_TYPES(value.scalar_type(), "ms_deform_attn_backward_cuda", ([&] {
+             ms_deformable_col2im_cuda(at::cuda::getCurrentCUDAStream(),
+                                     grad_output_g.data<scalar_t>(),
+                                     value.data<scalar_t>() + n * im2col_step_ * per_value_size,

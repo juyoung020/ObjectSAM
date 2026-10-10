@@ -32,5 +32,14 @@ foreach(prec fp16 fp32)
   target_link_libraries(bench_train_${prec} PRIVATE fso_${prec})
 endforeach()
 
+# 선생(CropFormer Hornet-L) 추론: 라벨 만들기용. 정밀도는 부분마다 템플릿으로 고른다(teacher/tnet.h).
+add_library(teacher STATIC teacher/tk.cu teacher/tnet.cpp teacher/prep.cpp src/conv.cpp)
+target_include_directories(teacher PUBLIC teacher src)
+target_link_libraries(teacher PUBLIC CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cufft cudnn turbojpeg pthread)
+add_executable(teacher_parity tests/teacher_parity.cpp)
+target_link_libraries(teacher_parity PRIVATE teacher)
+add_executable(teacher_label teacher/label.cpp)
+target_link_libraries(teacher_label PRIVATE teacher)
+
 add_executable(train src/train.cpp)
 target_link_libraries(train PRIVATE fso_fp16)
