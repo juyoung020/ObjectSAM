@@ -1,0 +1,83 @@
+# ObjectSAM 재학습 스펙
+
+상태: 작성 중 (사용자와 하나씩 정함). 정해진 것은 **결정**, 아직인 것은 **미정**으로 둔다.
+배경 조사: [FASTSAM_NETWORK.md](FASTSAM_NETWORK.md).
+
+## 1. 목표
+
+**한 줄 정의: 클래스 구분 없이 무엇이든 자르되, 구조물 배경(벽·바닥·천장·하늘)만 빼는 로봇용 SAM.**
+
+영상 속 물체를 클래스 없이 모두 분할하되, 벽·천장·바닥·하늘에는 마스크를 내지 않고,
+물체 하나에 마스크 하나(부분으로 쪼개지 않음)를 낸다. 로봇이 집을 물체를 찾는 데 쓴다 —
+컵·리모컨·휴대폰처럼 화면에서 작게 보이는 물체를 놓치지 않는 것이 중요하다.
+
+- **결정** 배경(마스크 없음): 벽, 천장, 바닥, 하늘 — 이 넷만. 바닥에는 실외의 걷는 면(도로·잔디·흙·모래 등)도 포함.
+- **결정** 그 밖은 모두 물체: 문·창·계단, 물, 건물, 나무, 러그 등.
+- **결정** 물체는 통째로(부분 마스크 없음).
+
+## 2. 신경망
+
+- **결정** FastSAM 과 같은 신경망: YOLOv8-seg, 클래스 1("object"). FastSAM 고유의 구조 변경은 없다.
+- **결정** 크기 s (YOLOv8s-seg, 약 1,179 만 파라미터) — FastSAM-s 와 같음.
+- **결정** 입력 640, reg_max 16 (FastSAM-s 그대로). COCO 사진(최대 640)과 로봇 카메라(640×480)에 맞고,
+  1024 는 정보 없이 시간만 약 2.5 배.
+
+## 3. 데이터
+
+- **결정** COCO 2017 (사람이 단 정답, 이름 있음). 나누기(92 : 4 : 4):
+  - 학습: train2017 중 113,287 장
+  - 검증: train2017 에서 뗀 5,000 장(고정 시드로 무작위) — 학습 중 곡선 보기·체크포인트 고르기에만
+  - 시험: val2017 5,000 장 — 끝까지 손대지 않고 최종 점수에만(원래 FastSAM-s·예전 ObjectSAM 과 같은 조건 비교)
+  - test2017 은 정답이 비공개라 우리 규칙(벽·바닥 제외)으로 채점할 수 없어 쓰지 않는다.
+- **결정** 외부 시험(학습에 안 쓴 데이터, 로봇 실내 일반화 확인): BEHAVIOR 시뮬 집 10 곳, ADE20K 실내 val.
+
+## 4. 라벨 규칙 (COCO panoptic → 정답 마스크)
+
+COCO panoptic 은 모든 화소에 클래스가 있다: 물체(thing) 80 종은 개체마다 마스크, 배경(stuff) 53 종은 클래스마다 한 덩어리.
+
+- **결정** 물체 80 종: 개체마다 정답 마스크 하나.
+- **결정** stuff 53 종 중 배경(정답 없음)은 19 종:
+  - 벽: wall-brick, wall-stone, wall-tile, wall-wood, wall-other-merged
+  - 천장: ceiling-merged
+  - 바닥: floor-wood, floor-other-merged, road, pavement-merged, dirt-merged, sand, gravel, snow, grass-merged,
+    playingfield, railroad, platform
+  - 하늘: sky-other-merged
+- **결정** 나머지 stuff 34 종은 물체(물 river·sea·water-other, 러그 rug-merged 포함). panoptic 에서 stuff 는 사진마다 클래스별 한 덩어리라(창문 셋이 마스크 하나),
+  서로 떨어진 조각(연결 성분)마다 나눠 개체로 쓴다. 맞붙은 것은 하나로 남는다.
+- **결정** iscrowd(개체로 나누지 않고 한 덩어리로 묶은 무리, val 정답의 0.8 %)는 **무시 영역**: 정답으로 쓰지 않고,
+  그 안에 중심이 있는 앵커는 점수 손실을 주지 않는다(맞다·틀리다 모두 가르치지 않음). 그대로 쓰면 "무리 = 마스크 하나"를,
+  그냥 빼면 "무리 속 개체 = 물체 아님"을 배워 개체를 하나하나 찾는 목표와 어긋나기 때문. 증강 때 정답과 같이 옮긴다.
+- **결정** 최소 크기 없음: 로봇이 집는 물체는 작게 보이는 경우가 많아 작은 정답(COCO 정답의 약 40 %)을 모두 쓴다.
+  증강 뒤 상자가 2 화소 이하가 된 정답만 학습기가 자동으로 뺀다(Ultralytics 와 같음).
+
+stuff 53 종: banner, blanket, bridge, cardboard, counter, curtain, door-stuff, floor-wood, flower, fruit, gravel, house,
+light, mirror-stuff, net, pillow, platform, playingfield, railroad, river, road, roof, sand, sea, shelf, snow, stairs, tent,
+towel, wall-brick, wall-stone, wall-tile, wall-wood, water-other, window-blind, window-other, tree-merged, fence-merged,
+ceiling-merged, sky-other-merged, cabinet-merged, table-merged, floor-other-merged, pavement-merged, mountain-merged,
+grass-merged, dirt-merged, paper-merged, food-other-merged, building-other-merged, rock-merged, wall-other-merged, rug-merged.
+
+## 5. 학습
+
+- **결정** 처음부터(무작위 초기화) — FastSAM 과 같음.
+- **결정** 학습기: 이 저장소의 C++/CUDA 학습기, fp16 + 동적 loss scaling, CUDA graph. Ultralytics 와 fp32 정합성 확인됨.
+- **결정** 하이퍼파라미터: FastSAM 과 같은 Ultralytics 기본값 — SGD lr0 0.01, lrf 0.01, momentum 0.937,
+  weight decay 5e-4, 워밍업 3 epoch, nbs 64, overlap_mask False, close_mosaic 0, mosaic·scale 0.5·translate 0.1·
+  fliplr 0.5·HSV, EMA.
+- **결정** epoch 상한 100(FastSAM 과 같음). lr 일정은 100 epoch 기준으로 고정.
+- **결정** 매 epoch 검증(Ultralytics 기본 val=True 와 같음). 학습을 멈추지 않고, 직전 epoch EMA 가중치를 다른 프로세스가
+  검증셋(5,000 장, 약 4 분)으로 잰다 — 학습은 약 5 % 만 느려진다(100 epoch 약 10 시간).
+- **결정** 가장 좋은 epoch 의 가중치를 best 로 따로 남긴다. 최종 모델은 best.
+- **결정** 조기 종료: 검증 지표가 20 epoch 연속 좋아지지 않으면 멈춘다.
+- **결정** 배치 32(FastSAM 과 같음), nbs 64 에 맞춰 2 번 누적. 640 입력에서 GPU 8.3 GB, 스텝 90.5 ms(초당 354 장),
+  epoch(113k 장)당 약 5.4 분.
+
+## 6. 평가
+
+- **결정** 검증 지표: 클래스 구분 없는 mask AP(COCO 방식, IoU 0.5~0.95, iscrowd 는 무시 영역) — best·조기 종료 기준.
+  보조로 크기별 재현율, 벽·천장·바닥·하늘 위 헛 마스크 수, 물체당 마스크 수(과분할)를 함께 기록.
+- **미정** 최종 시험: 비교 대상(원래 FastSAM-s, 예전 ObjectSAM)과 평가셋.
+- **미정** 합격 기준.
+
+## 7. 산출물
+
+- **미정** 내보내기 형식(.pt, ONNX, TensorRT)과 공개 여부.
