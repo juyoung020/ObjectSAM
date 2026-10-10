@@ -62,9 +62,9 @@ grass-merged, dirt-merged, paper-merged, food-other-merged, building-other-merge
 
 ## 5. 학습
 
-- **결정** 출발점은 FastSAM-s 가중치(신경망 같음). SA-1B 에서 배운 "무엇이든 물체로 보는 능력"(README 의 "finds things
-  it was never told about")을 지닌 채 COCO 로 구조물 제외·통째 분할을 배운다. COCO 만으로 처음부터 학습하면 목록 밖 물건을
-  찾는 능력이 약해질 수 있어서. 먼저 짧은 시험 학습으로 확인한다.
+- **결정** 출발점은 YOLOv8s-seg(COCO) 가중치(2026-10-10, 사용자). FastSAM-s 는 SA-1B 2 %(약 22 만 장)를 SAM 이 자동으로
+  만든 정답지(부분 마스크가 섞인 과분할)로 배워 그 습관을 안고 시작하게 된다. YOLOv8s-seg 는 COCO 의 사람이 그린 통째 마스크로
+  배웠고 구조가 같다. 다른 점은 마지막 클래스 출력층(80 → 1)뿐이라 그 층만 새로 초기화(Ultralytics bias 초기값)한다.
 - **결정** 학습기: 이 저장소의 C++/CUDA 학습기, fp16 + 동적 loss scaling, CUDA graph. Ultralytics 와 fp32 정합성 확인됨.
 - **결정** 하이퍼파라미터: FastSAM 과 같은 Ultralytics 기본값 — SGD lr0 0.01, lrf 0.01, momentum 0.937,
   weight decay 5e-4, 워밍업 3 epoch, nbs 64, overlap_mask False, close_mosaic 0, mosaic·scale 0.5·translate 0.1·

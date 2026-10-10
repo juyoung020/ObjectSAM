@@ -1,6 +1,6 @@
 // FastSAM-s 학습기(순수 C++/CUDA).
 //
-//   build/train --init weights/FastSAM-s.fsow --shards 'data/shards/sa_0000*.bin' --out runs/r1 [--epochs 20 ...]
+//   build/train --init weights/yolov8s-seg-nc1.fsow --shards 'data/shards/sa_0000*.bin' --out runs/r1 [--epochs 20 ...]
 //
 // 흐름(배치마다, 호스트는 GPU 를 기다리지 않는다):
 //   로더 스레드: 샤드 → 원본 디코딩 → pinned 버퍼(여럿 돌려 씀)
@@ -29,7 +29,7 @@ volatile sig_atomic_t g_stop = 0;
 void on_sig(int) { g_stop = 1; }
 
 struct Args {
-  std::string init = "weights/FastSAM-s.fsow", shards = "data/shards/*.bin", out = "runs/run", resume;
+  std::string init = "weights/yolov8s-seg-nc1.fsow", shards = "data/shards/*.bin", out = "runs/run", resume;
   int epochs = 20, batch = 16, imgsz = 1024, workers = 24, log_every = 50, G = 256;
   float lr0 = 0.002f, lrf = 0.01f;
   float warmup_epochs = 3.f;  // Ultralytics 기본 3; 공식 COCO 파인튜닝은 약 1
