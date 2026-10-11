@@ -136,4 +136,5 @@ class Model {
   cudaEvent_t ev_dz_[2] = {}, ev_wg_[2] = {}, ev_fork_ = nullptr, ev_join_ = nullptr;
   void wgrad_side(Node& nd, const act_t* dy, int buf);
   float* chpart_ = nullptr;
+  float* rgb_tmp_ = nullptr;  // 첫 층 wgrad 누적(fp32)
 };

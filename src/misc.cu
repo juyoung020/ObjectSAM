@@ -189,3 +189,85 @@ __global__ void k_accum_items(const float* src, float* acc, int n) {
 }
 }  // namespace
 void accum_items(const float* src, float* acc, int n, cudaStream_t st) { k_accum_items<<<1, 32, 0, st>>>(src, acc, n); }
+
+// ---------------------------------------------------------------- 첫 층 wgrad(입력 3 채널, 3×3 s2 p1, 출력 32 채널)
+// cuDNN 은 C=3 에서 텐서코어를 못 써 1.2 ms(4.7 TFLOPS) 걸린다. dW[k][r][s][c] = Σ_pix dz[pix][k]·x[patch(pix)][r,s,c] 를
+// 출력 화소 64 개씩 [dz 64×32]ᵀ × [patch 64×32(27 + 0 다섯)] 로 WMMA(fp16 입력, fp32 누적)에 태운다.
+#if !defined(FSO_FP32)
+#include <mma.h>
+namespace {
+constexpr int kWgTile = 64;  // 타일 하나 = 출력 한 행의 화소 64 개
+__global__ void __launch_bounds__(256) k_wgrad_rgb_s2(const __half* __restrict__ x, const __half* __restrict__ dz,
+                                                      int N, int H, int W, int P, int Q, float* __restrict__ dw) {
+  using namespace nvcuda;
+  __shared__ __align__(32) __half sdz[kWgTile * 32];
+  __shared__ __align__(32) __half spt[kWgTile * 32];
+  __shared__ __align__(32) float sc[8][16 * 16];
+  const int warp = threadIdx.x >> 5, mc = warp >> 1, kb = warp & 1;
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2];
+  wmma::fill_fragment(acc[0], 0.f);
+  wmma::fill_fragment(acc[1], 0.f);
+  const int tq = Q / kWgTile, ntile = N * P * tq;
+  for (int t = blockIdx.x; t < ntile; t += gridDim.x) {
+    const int q0 = (t % tq) * kWgTile, np = t / tq, p = np % P, n = np / P;
+    // dz: 화소 64 개 × 32 채널 = 연속 4 KB
+    const int64_t pix0 = (int64_t(n) * P + p) * Q + q0;
+    reinterpret_cast<uint4*>(sdz)[threadIdx.x] = reinterpret_cast<const uint4*>(dz + pix0 * 32)[threadIdx.x];
+    // patch: 스레드 하나가 한 화소의 8 칸
+    {
+      const int m = threadIdx.x >> 2, j0 = (threadIdx.x & 3) * 8, q = q0 + m;
+      __half v[8];
+      for (int u = 0; u < 8; u++) {
+        int j = j0 + u;
+        __half h = __float2half(0.f);
+        if (j < 27) {
+          int r = j / 9, s = (j / 3) % 3, c = j % 3;
+          int yy = 2 * p - 1 + r, xx = 2 * q - 1 + s;
+          if (yy >= 0 && yy < H && xx >= 0 && xx < W) h = x[((int64_t(n) * H + yy) * W + xx) * 3 + c];
+        }
+        v[u] = h;
+      }
+      *reinterpret_cast<uint4*>(spt + m * 32 + j0) = *reinterpret_cast<const uint4*>(v);
+    }
+    __syncthreads();
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::col_major> fa;
+    wmma::load_matrix_sync(fa, sdz + mc * 16 * 32 + kb * 16, 32);
+    for (int jb = 0; jb < 2; jb++) {
+      wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> fb;
+      wmma::load_matrix_sync(fb, spt + mc * 16 * 32 + jb * 16, 32);
+      wmma::mma_sync(acc[jb], fa, fb, acc[jb]);
+    }
+    __syncthreads();
+  }
+  // 같은 k 블록의 네 워프(화소 조각)를 더해 전역 fp32 에 atomicAdd
+  for (int jb = 0; jb < 2; jb++) {
+    wmma::store_matrix_sync(sc[warp], acc[jb], 16, wmma::mem_row_major);
+    __syncthreads();
+    for (int e = threadIdx.x; e < 2 * 256; e += blockDim.x) {
+      int b = e >> 8, i = e & 255, k = b * 16 + (i >> 4), j = jb * 16 + (i & 15);
+      float v = sc[b][i] + sc[b + 2][i] + sc[b + 4][i] + sc[b + 6][i];
+      if (j < 27) atomicAdd(&dw[k * 27 + j], v);
+    }
+    __syncthreads();
+  }
+}
+__global__ void k_f32_to_half(const float* s, __half* d, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) d[i] = __float2half(s[i]);
+}
+}  // namespace
+#endif
+
+bool wgrad_rgb_s2(const act_t* x, const act_t* dz, int N, int H, int W, int K, float* tmp, act_t* dw, cudaStream_t st) {
+#if defined(FSO_FP32)
+  (void)x; (void)dz; (void)N; (void)H; (void)W; (void)K; (void)tmp; (void)dw; (void)st;
+  return false;  // 정합성 시험(fp32)은 cuDNN 그대로
+#else
+  const int P = (H + 1) / 2, Q = (W + 1) / 2;
+  if (K != 32 || Q % kWgTile) return false;
+  CUDA_CHECK(cudaMemsetAsync(tmp, 0, 32 * 27 * sizeof(float), st));
+  k_wgrad_rgb_s2<<<70 * 8, 256, 0, st>>>(x, dz, N, H, W, P, Q, tmp);
+  k_f32_to_half<<<cdiv(32 * 27, 256), 256, 0, st>>>(tmp, dw, 32 * 27);
+  return true;
+#endif
+}

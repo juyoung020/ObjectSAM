@@ -81,8 +81,8 @@ grass-merged, dirt-merged, paper-merged, food-other-merged, building-other-merge
   검증셋(5,000 장, 약 4 분)으로 잰다 — 학습은 약 5 % 만 느려진다(100 epoch 약 10 시간).
 - **결정** 가장 좋은 epoch 의 가중치를 best 로 따로 남긴다. 최종 모델은 best.
 - **결정** 조기 종료: 검증 지표가 20 epoch 연속 좋아지지 않으면 멈춘다.
-- **결정** 배치 32(FastSAM 과 같음), nbs 64 에 맞춰 2 번 누적. 640 입력에서 GPU 8.3 GB, 스텝 90.5 ms(초당 354 장),
-  epoch(113k 장)당 약 5.4 분.
+- **결정** 배치 32(FastSAM 과 같음), nbs 64 에 맞춰 2 번 누적. 640 입력에서 GPU 8.7 GB, 초당 약 449 장(2026-10-11 최적화 전 354~364 장),
+  epoch(113k 장)당 약 4.2 분.
 
 ## 6. 평가
 

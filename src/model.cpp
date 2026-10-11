@@ -302,6 +302,7 @@ void Model::build(const ModelCfg& c, cudnnHandle_t h, cudaStream_t st) {
   dz_[1] = dalloc<act_t>(max_z);
   chpart_ = dalloc<float>(max_part);
   sums_ = dalloc<float>(2 * max_c);
+  rgb_tmp_ = dalloc<float>(32 * 27);
   {
     int64_t e = N * sp->H * sp->W * 256;
     pool_a_ = dalloc<float>(e);
@@ -416,9 +417,13 @@ void Model::forward(bool train) {
 void Model::wgrad_side(Node& nd, const act_t* dy, int buf) {
   CUDA_CHECK(cudaEventRecord(ev_dz_[buf], st_));
   CUDA_CHECK(cudaStreamWaitEvent(side_, ev_dz_[buf], 0));
-  CUDNN_CHECK(cudnnSetStream(h_, side_));
-  nd.conv.wgrad(nd.in->p, dy, params.gwact(nd.wnames[0]), ws_side_, ws_bytes);
-  CUDNN_CHECK(cudnnSetStream(h_, st_));
+  const ConvGeom& g = nd.conv.geom();
+  const bool rgb = nd.in == input() && g.C == 3 && g.R == 3 && g.S == 3 && g.stride == 2 && g.pad == 1;
+  if (!(rgb && wgrad_rgb_s2(nd.in->p, dy, g.N, g.H, g.W, g.K, rgb_tmp_, params.gwact(nd.wnames[0]), side_))) {
+    CUDNN_CHECK(cudnnSetStream(h_, side_));
+    nd.conv.wgrad(nd.in->p, dy, params.gwact(nd.wnames[0]), ws_side_, ws_bytes);
+    CUDNN_CHECK(cudnnSetStream(h_, st_));
+  }
   CUDA_CHECK(cudaEventRecord(ev_wg_[buf], side_));
 }
 

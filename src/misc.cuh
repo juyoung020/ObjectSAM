@@ -22,3 +22,7 @@ void act_accum_f32(const act_t* src, float* dst, int64_t n, bool accum, cudaStre
 void fill_f32(float* p, float v, int64_t n, cudaStream_t st);
 // acc[0..n) += src[0..n), acc[n] += 1 (학습 로그용 손실 합을 장치에서 모은다 — graph 안에서 호스트 왕복 없이)
 void accum_items(const float* src, float* acc, int n, cudaStream_t st);
+
+// 첫 층(입력 3 채널, 3×3 stride 2 pad 1, 출력 K=32) wgrad: dw(KRSC, act_t) = Σ dz ⊗ patch(x). 쓸 수 없는 모양·fp32 판은
+// false(호출자가 cuDNN 으로). tmp: fp32 [K·27] 작업 공간.
+bool wgrad_rgb_s2(const act_t* x, const act_t* dz, int N, int H, int W, int K, float* tmp, act_t* dw, cudaStream_t st);
