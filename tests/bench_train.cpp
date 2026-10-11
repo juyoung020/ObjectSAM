@@ -14,7 +14,9 @@ int main(int argc, char** argv) {
   FSO_ASSERT(argc >= 2, "usage: bench_train <weights.fsow> [batch] [imgsz] [iters]");
   int B = argc > 2 ? atoi(argv[2]) : 16, S = argc > 3 ? atoi(argv[3]) : 1024, iters = argc > 4 ? atoi(argv[4]) : 30;
   cudaStream_t st;
-  CUDA_CHECK(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking));
+  int prio_lo, prio_hi;  // train 과 같이 계산 스트림은 높은 우선순위
+  CUDA_CHECK(cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi));
+  CUDA_CHECK(cudaStreamCreateWithPriority(&st, cudaStreamNonBlocking, prio_hi));
   cudnnHandle_t h;
   CUDNN_CHECK(cudnnCreate(&h));
   CUDNN_CHECK(cudnnSetStream(h, st));

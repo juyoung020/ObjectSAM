@@ -126,9 +126,14 @@ class Model {
   Act* head_[3][3] = {};
   Act* proto_ = nullptr;
   void* ws_ = nullptr;
-  float2* part_ = nullptr;
   float* sums_ = nullptr;
   float *pool_a_ = nullptr, *pool_b_ = nullptr;
-  act_t* dz_ = nullptr;  // 역방향 작업 버퍼(층 사이에 재사용)
+  // 역방향: wgrad 는 곁 스트림에서 다음 층의 BN 역방향·dgrad 와 겹쳐 돈다(계산 한계 conv 와 대역폭 한계 BN 이
+  // 함께 돈다). dz 는 두 벌을 번갈아 쓰고, 곁 스트림은 작업 공간도 따로.
+  act_t* dz_[2] = {};
+  void* ws_side_ = nullptr;
+  cudaStream_t side_ = nullptr;
+  cudaEvent_t ev_dz_[2] = {}, ev_wg_[2] = {}, ev_fork_ = nullptr, ev_join_ = nullptr;
+  void wgrad_side(Node& nd, const act_t* dy, int buf);
   float* chpart_ = nullptr;
 };

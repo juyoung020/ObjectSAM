@@ -92,32 +92,61 @@ __global__ void k_image(BatchBuf d, int S, act_t* out) {
   o[2] = from_f<act_t>(rgb[2] / 255.f);
 }
 
-// 표본마다 정답 상자: 원본 → 캔버스(타일로 자름) → affine → 출력(0..S 로 자름) → 뒤집기 → 후보 거르기
-__global__ void k_targets(BatchBuf d, int S, AugOut o) {
-  int i = blockIdx.x;
-  if (threadIdx.x != 0) return;
-  const SampleInfo sm = d.smp[i];
-  int n = 0, ninst = d.hdr->ninst;
-  for (int k = 0; k < ninst && n < o.G; k++) {
-    const InstInfo in = d.inst[k];
-    if (in.sample != i || in.ignore) continue;
-    int t = in.tile;
-    float dx = float(sm.ta[t][0] - sm.tb[t][0]), dy = float(sm.ta[t][1] - sm.tb[t][1]);
-    float x1 = fmaxf(in.box[0] + dx, sm.ta[t][0]), y1 = fmaxf(in.box[1] + dy, sm.ta[t][1]);
-    float x2 = fminf(in.box[2] + dx, sm.ta[t][2]), y2 = fminf(in.box[3] + dy, sm.ta[t][3]);
-    if (x2 <= x1 || y2 <= y1) continue;
-    float w1 = (x2 - x1) * sm.s, h1 = (y2 - y1) * sm.s;
-    float X1 = fminf(fmaxf(sm.s * x1 + sm.tx, 0.f), float(S)), X2 = fminf(fmaxf(sm.s * x2 + sm.tx, 0.f), float(S));
-    float Y1 = fminf(fmaxf(sm.s * y1 + sm.ty, 0.f), float(S)), Y2 = fminf(fmaxf(sm.s * y2 + sm.ty, 0.f), float(S));
-    if (sm.flip) { float a = S - X2, b = S - X1; X1 = a; X2 = b; }
-    float w2 = X2 - X1, h2 = Y2 - Y1;
-    float ar = fmaxf(w2 / (h2 + 1e-16f), h2 / (w2 + 1e-16f));
-    if (!(w2 > 2.f && h2 > 2.f && w2 * h2 / (w1 * h1 + 1e-16f) > 0.1f && ar < 100.f)) continue;
-    o.gt.box[i * o.G + n] = make_float4(X1, Y1, X2, Y2);
-    o.gt_inst[i * o.G + n] = k;
-    n++;
+// 블록 안 순서 보존 압축: keep 인 스레드의 (블록 앞 스레드들 중 keep 수), 전체 keep 수. blockDim 은 32 의 배수.
+__device__ __forceinline__ int block_rank(bool keep, int& total) {
+  __shared__ int wsum[32];
+  unsigned m = __ballot_sync(~0u, keep);
+  int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
+  if (lane == 0) wsum[w] = __popc(m);
+  __syncthreads();
+  int off = 0;
+  total = 0;
+  for (int q = 0; q < int(blockDim.x >> 5); q++) {
+    if (q < w) off += wsum[q];
+    total += wsum[q];
   }
-  o.gt.n_gt[i] = n;
+  __syncthreads();
+  return off + __popc(m & ((1u << lane) - 1u));
+}
+
+// 표본마다 정답 상자: 원본 → 캔버스(타일로 자름) → affine → 출력(0..S 로 자름) → 뒤집기 → 후보 거르기.
+// 블록 하나 = 표본 하나. 인스턴스를 blockDim 개씩 나눠 보고, 원래 순서대로 앞에서 G 개까지.
+__global__ void k_targets(BatchBuf d, int S, AugOut o) {
+  const int i = blockIdx.x;
+  const SampleInfo sm = d.smp[i];
+  const int ninst = d.hdr->ninst;
+  int n = 0;
+  for (int k0 = 0; k0 < ninst && n < o.G; k0 += blockDim.x) {
+    const int k = k0 + threadIdx.x;
+    bool keep = false;
+    float X1 = 0.f, Y1 = 0.f, X2 = 0.f, Y2 = 0.f;
+    if (k < ninst) {
+      const InstInfo in = d.inst[k];
+      if (in.sample == i && !in.ignore) {
+        int t = in.tile;
+        float dx = float(sm.ta[t][0] - sm.tb[t][0]), dy = float(sm.ta[t][1] - sm.tb[t][1]);
+        float x1 = fmaxf(in.box[0] + dx, sm.ta[t][0]), y1 = fmaxf(in.box[1] + dy, sm.ta[t][1]);
+        float x2 = fminf(in.box[2] + dx, sm.ta[t][2]), y2 = fminf(in.box[3] + dy, sm.ta[t][3]);
+        if (x2 > x1 && y2 > y1) {
+          float w1 = (x2 - x1) * sm.s, h1 = (y2 - y1) * sm.s;
+          X1 = fminf(fmaxf(sm.s * x1 + sm.tx, 0.f), float(S)); X2 = fminf(fmaxf(sm.s * x2 + sm.tx, 0.f), float(S));
+          Y1 = fminf(fmaxf(sm.s * y1 + sm.ty, 0.f), float(S)); Y2 = fminf(fmaxf(sm.s * y2 + sm.ty, 0.f), float(S));
+          if (sm.flip) { float a = S - X2, b = S - X1; X1 = a; X2 = b; }
+          float w2 = X2 - X1, h2 = Y2 - Y1;
+          float ar = fmaxf(w2 / (h2 + 1e-16f), h2 / (w2 + 1e-16f));
+          keep = w2 > 2.f && h2 > 2.f && w2 * h2 / (w1 * h1 + 1e-16f) > 0.1f && ar < 100.f;
+        }
+      }
+    }
+    int total;
+    int slot = n + block_rank(keep, total);
+    if (keep && slot < o.G) {
+      o.gt.box[i * o.G + slot] = make_float4(X1, Y1, X2, Y2);
+      o.gt_inst[i * o.G + slot] = k;
+    }
+    n += total;
+  }
+  if (threadIdx.x == 0) o.gt.n_gt[i] = min(n, o.G);
 }
 
 // 정답 마스크 비트(Hp×Wp, 칸 = 출력 4×4 화소): 칸 중심을 거꾸로 따라가 원본 마스크에서 집어 온다.
@@ -158,41 +187,55 @@ __global__ void k_gtmask(BatchBuf d, int S, AugOut o) {
 }
 
 // 무시 영역 비트(Hp×Wp): 표본마다 무시 인스턴스를 정답 마스크와 같은 규칙으로 옮긴다. 블록 하나 = 표본 하나.
+// 이 표본의 무시 인스턴스를 blockDim 개씩 공유 메모리 목록으로 모은 뒤 하나씩 블록 전체가 칸을 나눠 본다.
 __global__ void k_ignore(BatchBuf d, int S, AugOut o) {
   int i = blockIdx.x;
   const SampleInfo sm = d.smp[i];
   int ninst = d.hdr->ninst, words = o.Hp * o.Wp / 32;
   float cs = float(S) / o.Wp;
   uint32_t* dst = o.gt.ignore + int64_t(i) * words;
-  for (int k = 0; k < ninst; k++) {
-    const InstInfo in = d.inst[k];
-    if (in.sample != i || !in.ignore) continue;
-    const SrcInfo si = d.src[in.src];
-    int t = in.tile;
-    float dx = float(sm.ta[t][0] - sm.tb[t][0]), dy = float(sm.ta[t][1] - sm.tb[t][1]);
-    float x1 = fmaxf(in.box[0] + dx, sm.ta[t][0]), y1 = fmaxf(in.box[1] + dy, sm.ta[t][1]);
-    float x2 = fminf(in.box[2] + dx, sm.ta[t][2]), y2 = fminf(in.box[3] + dy, sm.ta[t][3]);
-    if (x2 <= x1 || y2 <= y1) continue;
-    float X1 = fminf(fmaxf(sm.s * x1 + sm.tx, 0.f), float(S)), X2 = fminf(fmaxf(sm.s * x2 + sm.tx, 0.f), float(S));
-    float Y1 = fminf(fmaxf(sm.s * y1 + sm.ty, 0.f), float(S)), Y2 = fminf(fmaxf(sm.s * y2 + sm.ty, 0.f), float(S));
-    if (sm.flip) { float a = S - X2, b = S - X1; X1 = a; X2 = b; }
-    int c0 = max(0, int(floorf(X1 / cs)) - 1), c1 = min(o.Wp, int(ceilf(X2 / cs)) + 1);
-    int r0 = max(0, int(floorf(Y1 / cs)) - 1), r1 = min(o.Hp, int(ceilf(Y2 / cs)) + 1);
-    float kx = float(si.mw) / si.iw, ky = float(si.mh) / si.ih;
-    for (int q = threadIdx.x; q < (c1 - c0) * (r1 - r0); q += blockDim.x) {
-      int r = r0 + q / (c1 - c0), c = c0 + q % (c1 - c0);
-      float x = (c + 0.5f) * cs - 0.5f, y = (r + 0.5f) * cs - 0.5f;
-      float xs = sm.flip ? S - 1 - x : x;
-      float u = (xs - sm.tx) / sm.s, v = (y - sm.ty) / sm.s;
-      if (u < sm.ta[t][0] || u >= sm.ta[t][2] || v < sm.ta[t][1] || v >= sm.ta[t][3]) continue;
-      float sx = u - sm.ta[t][0] + sm.tb[t][0], sy = v - sm.ta[t][1] + sm.tb[t][1];
-      int mx = int(floorf((sx + 0.5f) * kx)) - in.mx0, my = int(floorf((sy + 0.5f) * ky)) - in.my0;
-      if (mx < 0 || my < 0 || mx >= in.mcw || my >= in.mch) continue;
-      if (d.mask[in.mask_off + int64_t(my) * in.wpr + (mx >> 5)] >> (mx & 31) & 1u) {
-        int64_t bit = int64_t(r) * o.Wp + c;
-        atomicOr(&dst[bit >> 5], 1u << (bit & 31));
+  __shared__ int lst[1024];
+  for (int k0 = 0; k0 < ninst; k0 += blockDim.x) {
+    const int kk = k0 + threadIdx.x;
+    bool hit = false;
+    if (kk < ninst) {
+      const InstInfo& in = d.inst[kk];
+      hit = in.sample == i && in.ignore;
+    }
+    int nl;
+    int slot = block_rank(hit, nl);
+    if (hit) lst[slot] = kk;
+    __syncthreads();
+    for (int li = 0; li < nl; li++) {
+      const InstInfo in = d.inst[lst[li]];
+      const SrcInfo si = d.src[in.src];
+      int t = in.tile;
+      float dx = float(sm.ta[t][0] - sm.tb[t][0]), dy = float(sm.ta[t][1] - sm.tb[t][1]);
+      float x1 = fmaxf(in.box[0] + dx, sm.ta[t][0]), y1 = fmaxf(in.box[1] + dy, sm.ta[t][1]);
+      float x2 = fminf(in.box[2] + dx, sm.ta[t][2]), y2 = fminf(in.box[3] + dy, sm.ta[t][3]);
+      if (x2 <= x1 || y2 <= y1) continue;
+      float X1 = fminf(fmaxf(sm.s * x1 + sm.tx, 0.f), float(S)), X2 = fminf(fmaxf(sm.s * x2 + sm.tx, 0.f), float(S));
+      float Y1 = fminf(fmaxf(sm.s * y1 + sm.ty, 0.f), float(S)), Y2 = fminf(fmaxf(sm.s * y2 + sm.ty, 0.f), float(S));
+      if (sm.flip) { float a = S - X2, b = S - X1; X1 = a; X2 = b; }
+      int c0 = max(0, int(floorf(X1 / cs)) - 1), c1 = min(o.Wp, int(ceilf(X2 / cs)) + 1);
+      int r0 = max(0, int(floorf(Y1 / cs)) - 1), r1 = min(o.Hp, int(ceilf(Y2 / cs)) + 1);
+      float kx = float(si.mw) / si.iw, ky = float(si.mh) / si.ih;
+      for (int q = threadIdx.x; q < (c1 - c0) * (r1 - r0); q += blockDim.x) {
+        int r = r0 + q / (c1 - c0), c = c0 + q % (c1 - c0);
+        float x = (c + 0.5f) * cs - 0.5f, y = (r + 0.5f) * cs - 0.5f;
+        float xs = sm.flip ? S - 1 - x : x;
+        float u = (xs - sm.tx) / sm.s, v = (y - sm.ty) / sm.s;
+        if (u < sm.ta[t][0] || u >= sm.ta[t][2] || v < sm.ta[t][1] || v >= sm.ta[t][3]) continue;
+        float sx = u - sm.ta[t][0] + sm.tb[t][0], sy = v - sm.ta[t][1] + sm.tb[t][1];
+        int mx = int(floorf((sx + 0.5f) * kx)) - in.mx0, my = int(floorf((sy + 0.5f) * ky)) - in.my0;
+        if (mx < 0 || my < 0 || mx >= in.mcw || my >= in.mch) continue;
+        if (d.mask[in.mask_off + int64_t(my) * in.wpr + (mx >> 5)] >> (mx & 31) & 1u) {
+          int64_t bit = int64_t(r) * o.Wp + c;
+          atomicOr(&dst[bit >> 5], 1u << (bit & 31));
+        }
       }
     }
+    __syncthreads();
   }
 }
 
@@ -201,7 +244,7 @@ __global__ void k_ignore(BatchBuf d, int S, AugOut o) {
 void augment(const BatchBuf& dev, int B, int S, const AugOut& o, cudaStream_t st) {
   CUDA_CHECK(cudaMemsetAsync(o.gt.mask, 0, size_t(B) * o.G * o.Hp * o.Wp / 8, st));
   k_image<<<dim3(cdiv(int64_t(S) * S, kT), B), kT, 0, st>>>(dev, S, o.img);
-  k_targets<<<B, 32, 0, st>>>(dev, S, o);
+  k_targets<<<B, 256, 0, st>>>(dev, S, o);
   k_gtmask<<<dim3(o.G, B), 128, 0, st>>>(dev, S, o);
   if (o.gt.ignore) {
     CUDA_CHECK(cudaMemsetAsync(o.gt.ignore, 0, size_t(B) * o.Hp * o.Wp / 8, st));

@@ -20,6 +20,38 @@ __device__ __forceinline__ void anchor_of(const Lv& L, int a, int& l, int& h, in
 __device__ __forceinline__ float sigm(float x) { return 1.f / (1.f + expf(-x)); }
 __device__ __forceinline__ float bce_logits(float x, float y) { return fmaxf(x, 0.f) - x * y + log1pf(expf(-fabsf(x))); }
 
+// 8 개(16 B 또는 32 B) 한 번에 읽기·쓰기(주소는 8 개 단위로 정렬)
+__device__ __forceinline__ void ld8(const float* p, float o[8]) {
+  float4 a = *reinterpret_cast<const float4*>(p), b = *reinterpret_cast<const float4*>(p + 4);
+  o[0] = a.x; o[1] = a.y; o[2] = a.z; o[3] = a.w; o[4] = b.x; o[5] = b.y; o[6] = b.z; o[7] = b.w;
+}
+__device__ __forceinline__ void st8(float* p, const float o[8]) {
+  *reinterpret_cast<float4*>(p) = make_float4(o[0], o[1], o[2], o[3]);
+  *reinterpret_cast<float4*>(p + 4) = make_float4(o[4], o[5], o[6], o[7]);
+}
+__device__ __forceinline__ void ld8(const __half* p, float o[8]) {
+  uint4 u = *reinterpret_cast<const uint4*>(p);
+  const __half2* h = reinterpret_cast<const __half2*>(&u);
+  for (int i = 0; i < 4; i++) { float2 f = __half22float2(h[i]); o[2 * i] = f.x; o[2 * i + 1] = f.y; }
+}
+__device__ __forceinline__ void st8(__half* p, const float o[8]) {
+  uint4 u;
+  __half2* h = reinterpret_cast<__half2*>(&u);
+  for (int i = 0; i < 4; i++) h[i] = __floats2half2_rn(o[2 * i], o[2 * i + 1]);
+  *reinterpret_cast<uint4*>(p) = u;
+}
+__device__ __forceinline__ void ld32(const act_t* p, float o[32]) {
+  for (int k = 0; k < 32; k += 8) ld8(p + k, o + k);
+}
+__device__ __forceinline__ void st32(act_t* p, const float o[32]) {
+  for (int k = 0; k < 32; k += 8) st8(p + k, o + k);
+}
+// n(8 의 배수) 개를 0 으로
+__device__ __forceinline__ void zero_n(act_t* p, int n) {
+  const float z[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+  for (int k = 0; k < n; k += 8) st8(p + k, z);
+}
+
 // Ultralytics bbox_iou(box1, box2, xywh=False, CIoU=True). alpha 는 상수(no_grad) 취급.
 __device__ float ciou(float4 b1, float4 b2) {
   float w1 = b1.z - b1.x, h1 = b1.w - b1.y + kCiouEps, w2 = b2.z - b2.x, h2 = b2.w - b2.y + kCiouEps;
@@ -311,15 +343,15 @@ __global__ void k_det(DetArgs P) {
     P.dcls[l][pix] = from_f<act_t>(ign ? 0.f : (sigm(x) - t) * P.cls_gain * sc);
     act_t* db = P.dbox[l] + pix * 4 * kReg;
     if (j < 0) {
-      for (int k = 0; k < 4 * kReg; k++) db[k] = from_f<act_t>(0.f);
-      act_t* dc = P.dcoef[l] + pix * 32;
-      for (int k = 0; k < 32; k++) dc[k] = from_f<act_t>(0.f);
+      zero_n(db, 4 * kReg);
+      zero_n(P.dcoef[l] + pix * 32, 32);
     } else {
       const act_t* bl = P.box[l] + pix * 4 * kReg;
       float pr[4][kReg], dist[4];
+      for (int k = 0; k < 4 * kReg; k += 8) ld8(bl + k, &pr[0][0] + k);
       for (int s = 0; s < 4; s++) {
         float m = -INFINITY;
-        for (int k = 0; k < kReg; k++) { pr[s][k] = to_f(bl[s * kReg + k]); m = fmaxf(m, pr[s][k]); }
+        for (int k = 0; k < kReg; k++) m = fmaxf(m, pr[s][k]);
         float z = 0;
         for (int k = 0; k < kReg; k++) { pr[s][k] = expf(pr[s][k] - m); z += pr[s][k]; }
         float e = 0;
@@ -338,6 +370,7 @@ __global__ void k_det(DetArgs P) {
       float dd[4] = {-gb.x * gi, -gb.y * gi, gb.z * gi, gb.w * gi};  // d / d dist (lt, rb)
       float tl[4] = {ax - tb.x, ay - tb.y, tb.z - ax, tb.w - ay};
       float gd = t * 0.25f * P.dfl_gain * sc;
+      float gbuf[4][kReg];
       for (int s = 0; s < 4; s++) {
         float tt = fminf(fmaxf(tl[s], 0.f), kReg - 1 - 0.01f);
         int il = int(tt), ir = il + 1;
@@ -345,10 +378,10 @@ __global__ void k_det(DetArgs P) {
         ldfl += -(logf(pr[s][il]) * wl + logf(pr[s][ir]) * wr) * 0.25f * t;
         for (int k = 0; k < kReg; k++) {
           float p = pr[s][k];
-          float g = dd[s] * p * (k - dist[s]) + gd * (p - (k == il ? wl : 0.f) - (k == ir ? wr : 0.f));
-          db[s * kReg + k] = from_f<act_t>(g);
+          gbuf[s][k] = dd[s] * p * (k - dist[s]) + gd * (p - (k == il ? wl : 0.f) - (k == ir ? wr : 0.f));
         }
       }
+      for (int k = 0; k < 4 * kReg; k += 8) st8(db + k, &gbuf[0][0] + k);
     }
   }
   block_add(lcls, &P.items[10]);
@@ -380,48 +413,80 @@ __device__ __forceinline__ void crop_of(const MaskArgs& P, float4 tg, float& x1,
   area = (nx2 - nx1) * (ny2 - ny1);
   x1 = nx1 * P.Wp; x2 = nx2 * P.Wp; y1 = ny1 * P.Hp; y2 = ny2 * P.Hp;
 }
-__global__ void k_mask_tile(MaskArgs P) {
-  int b = blockIdx.y;
-  int tx = blockIdx.x % (P.Wp / 16), ty = blockIdx.x / (P.Wp / 16);
-  int px = tx * 16 + (threadIdx.x & 15), py = ty * 16 + (threadIdx.x >> 4);
-  int64_t pix = (int64_t(b) * P.Hp + py) * P.Wp + px;
+constexpr int kMC = 64;  // k_mask_tile: 한 번에 공유 메모리로 올리는 양성 수
+__global__ void __launch_bounds__(kT) k_mask_tile(MaskArgs P) {
+  const int b = blockIdx.y;
+  const int tx = blockIdx.x % (P.Wp / 16), ty = blockIdx.x / (P.Wp / 16);
+  const int px = tx * 16 + (threadIdx.x & 15), py = ty * 16 + (threadIdx.x >> 4);
+  const int64_t pix = (int64_t(b) * P.Hp + py) * P.Wp + px;
   float pr[32], acc[32];
-  const act_t* pp = P.proto + pix * 32;
-  for (int k = 0; k < 32; k++) { pr[k] = to_f(pp[k]); acc[k] = 0.f; }
-  float fg = fmaxf(P.items[4], 1.f);
-  float hw = float(P.Hp) * P.Wp;
+  ld32(P.proto + pix * 32, pr);
+  for (int k = 0; k < 32; k++) acc[k] = 0.f;
+  const float fg = fmaxf(P.items[4], 1.f);
+  const float hw = float(P.Hp) * P.Wp;
+  const float gk = P.box_gain * float(P.B) / fg * *P.scale;
   float lsum = 0.f;
-  int np = P.npos[b];
-  int words = P.Hp * P.Wp / 32;
-  __shared__ float cf[32];
-  for (int i = 0; i < np; i++) {
-    int a = P.pos[b * P.A + i];
-    int j = P.agt[b * P.A + a];
-    float4 tg = P.gtb[b * P.G + j];
-    float x1, y1, x2, y2, area;
-    crop_of(P, tg, x1, y1, x2, y2, area);
-    // 타일 [tx*16, tx*16+16) 와 [x1, x2) 가 겹치나(화소 번호 r 은 r>=x1 && r<x2)
-    if (!(tx * 16 + 15 >= x1 && tx * 16 < x2 && ty * 16 + 15 >= y1 && ty * 16 < y2)) continue;
+  const int np = P.npos[b];
+  const int words = P.Hp * P.Wp / 32;
+  const int pi = py * P.Wp + px;
+  // 타일과 겹치는 양성만 차례를 지켜 공유 메모리 목록으로(정답 번호, 자른 상자, 1/(hw·area), 계수)
+  __shared__ __align__(16) float cf[kMC][32];
+  __shared__ float4 cbox[kMC];
+  __shared__ float cinv[kMC];
+  __shared__ int cj[kMC], canc[kMC], wcnt[kMC / 32];
+  for (int base = 0; base < np; base += kMC) {
+    bool hit = false;
+    int a = 0, j = 0;
+    float4 bx;
+    float inv = 0.f;
+    if (threadIdx.x < kMC && base + threadIdx.x < np) {
+      a = P.pos[b * P.A + base + threadIdx.x];
+      j = P.agt[b * P.A + a];
+      float x1, y1, x2, y2, area;
+      crop_of(P, P.gtb[b * P.G + j], x1, y1, x2, y2, area);
+      bx = make_float4(x1, y1, x2, y2);
+      inv = 1.f / (hw * area);
+      // 타일 [tx*16, tx*16+16) 와 [x1, x2) 가 겹치나(화소 번호 r 은 r>=x1 && r<x2)
+      hit = tx * 16 + 15 >= x1 && tx * 16 < x2 && ty * 16 + 15 >= y1 && ty * 16 < y2;
+    }
+    unsigned m = __ballot_sync(~0u, hit);
+    const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
+    if (threadIdx.x < kMC && lane == 0) wcnt[wp] = __popc(m);
     __syncthreads();
-    if (threadIdx.x < 32) {
-      int l, h, w;
-      anchor_of(P.L, a, l, h, w);
-      cf[threadIdx.x] = to_f(P.coef[l][((int64_t(b) * P.L.h[l] + h) * P.L.w[l] + w) * 32 + threadIdx.x]);
+    int n = 0;
+    for (int w = 0; w < kMC / 32; w++) n += wcnt[w];
+    if (hit) {
+      int slot = __popc(m & ((1u << lane) - 1u));
+      for (int w = 0; w < wp; w++) slot += wcnt[w];
+      cbox[slot] = bx; cinv[slot] = inv; cj[slot] = j; canc[slot] = a;
     }
     __syncthreads();
-    if (px >= x1 && px < x2 && py >= y1 && py < y2) {
+    for (int t = threadIdx.x; t < n * 32; t += blockDim.x) {
+      int i = t >> 5, k = t & 31, l, h, w;
+      anchor_of(P.L, canc[i], l, h, w);
+      cf[i][k] = to_f(P.coef[l][((int64_t(b) * P.L.h[l] + h) * P.L.w[l] + w) * 32 + k]);
+    }
+    __syncthreads();
+    for (int i = 0; i < n; i++) {
+      float4 c = cbox[i];
+      if (!(px >= c.x && px < c.z && py >= c.y && py < c.w)) continue;
+      const float4* cv = reinterpret_cast<const float4*>(cf[i]);
       float z = 0.f;
-      for (int k = 0; k < 32; k++) z += cf[k] * pr[k];
-      int pi = py * P.Wp + px;
-      float y = (P.gmask[(int64_t(b) * P.G + j) * words + (pi >> 5)] >> (pi & 31)) & 1u ? 1.f : 0.f;
-      float inv = 1.f / (hw * area);
-      lsum += bce_logits(z, y) * inv;
-      float g = (sigm(z) - y) * inv * P.box_gain * float(P.B) / fg * *P.scale;
-      for (int k = 0; k < 32; k++) acc[k] += g * cf[k];
+      for (int k = 0; k < 8; k++) {
+        float4 v = cv[k];
+        z += v.x * pr[4 * k] + v.y * pr[4 * k + 1] + v.z * pr[4 * k + 2] + v.w * pr[4 * k + 3];
+      }
+      float y = (P.gmask[(int64_t(b) * P.G + cj[i]) * words + (pi >> 5)] >> (pi & 31)) & 1u ? 1.f : 0.f;
+      lsum += bce_logits(z, y) * cinv[i];
+      float g = (sigm(z) - y) * cinv[i] * gk;
+      for (int k = 0; k < 8; k++) {
+        float4 v = cv[k];
+        acc[4 * k] += g * v.x; acc[4 * k + 1] += g * v.y; acc[4 * k + 2] += g * v.z; acc[4 * k + 3] += g * v.w;
+      }
     }
+    __syncthreads();
   }
-  act_t* dp = P.dproto + pix * 32;
-  for (int k = 0; k < 32; k++) dp[k] = from_f<act_t>(acc[k]);
+  st32(P.dproto + pix * 32, acc);
   block_add(lsum, &P.items[9]);
 }
 
@@ -454,9 +519,9 @@ __global__ void k_mask_coef(MaskArgs P) {
       float sc = P.box_gain * float(P.B) / (fg * hw * area) * *P.scale;
       for (int t = threadIdx.x; t < n; t += blockDim.x) {
         int py = r0 + t / nw, px = c0 + t % nw;
-        const act_t* pp = P.proto + ((int64_t(b) * P.Hp + py) * P.Wp + px) * 32;
         float pr[32], z = 0.f;
-        for (int k = 0; k < 32; k++) { pr[k] = to_f(pp[k]); z += cf[k] * pr[k]; }
+        ld32(P.proto + ((int64_t(b) * P.Hp + py) * P.Wp + px) * 32, pr);
+        for (int k = 0; k < 32; k++) z += cf[k] * pr[k];
         int pi = py * P.Wp + px;
         float y = (P.gmask[(int64_t(b) * P.G + j) * words + (pi >> 5)] >> (pi & 31)) & 1u ? 1.f : 0.f;
         float g = (sigm(z) - y) * sc;

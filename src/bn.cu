@@ -1,7 +1,8 @@
 // BN+SiLU 커널. 메모리 대역폭이 한계라 다음을 지킨다:
 //  - 스레드 하나가 한 화소의 8 채널(16 B)을 한 번에 읽고 쓴다(채널 수·슬라이스 경계는 모두 8 의 배수).
 //  - 워프 안 스레드는 같은 화소의 연속 채널 → 다음 화소 순서라 접근이 이어진다.
-//  - 통계는 블록별 부분합 → 마지막 블록이 마무리(커널 하나). 분산은 running mean 을 기준점으로 빼서 fp32 로 상쇄 없이.
+//  - 통계는 블록별 fp32 부분합을 채널별 double 누산기에 atomicAdd → 마지막 블록이 마무리하고 누산기를 0 으로 되돌린다
+//    (커널 하나, 마무리 꼬리가 블록 수에 비례하지 않는다). 분산은 running mean 을 기준점으로 빼서 상쇄 없이.
 #include "bn.cuh"
 
 namespace {
@@ -74,7 +75,7 @@ Geo geo(const BnShape& s) {
   int64_t M = s.M();
   int target = 560;  // 70 SM × 8
   int64_t r = cdiv(M, target);
-  if (r < 16) r = 16;
+  if (r < 64) r = 64;  // 작은 층: 블록 수(누산기 atomic 수)를 줄인다
   g.rows_per_blk = int(r);
   g.nblk = cdiv(M, r);
   return g;
@@ -102,7 +103,7 @@ struct RedArgs {
   float* gw_beta;
   bool accum;
   // 공통
-  float2* part;
+  double* acc;  // [2C] 채널별 누산기(0 으로 시작, 마지막 블록이 되돌린다)
   unsigned* counter;
 };
 
@@ -124,19 +125,28 @@ __global__ void __launch_bounds__(kT) k_reduce(RedArgs P) {
     } else {
       ld8f(P.scale + c, sc); ld8f(P.shift + c, sh); ld8f(P.mean + c, mu); ld8f(P.istd + c, is);
     }
-    for (int r = r0 + rl; r < r1; r += P.g.rowlanes) {
-      float zv[8];
-      ld8(P.z + int64_t(r) * s.C + c, zv);
-      if (MODE == 0) {
-        for (int i = 0; i < 8; i++) { float d = zv[i] - K[i]; a[i] += d; b[i] += d * d; }
-      } else {
-        float dA[8];
-        gather8(P.dl, r, c, s.H, s.W, dA);
-        for (int i = 0; i < 8; i++) {
-          float g = dA[i];
-          if (P.act) { float y = sc[i] * zv[i] + sh[i], sg = sigm(y); g *= sg * (1.f + y * (1.f - sg)); }
-          a[i] += g;
-          b[i] += g * (zv[i] - mu[i]) * is[i];
+    // 행 둘씩: 읽기를 먼저 모아 내보내 지연을 겹친다(블록이 적은 작은 층에서 중요)
+    const int rs = P.g.rowlanes;
+    for (int r = r0 + rl; r < r1; r += 2 * rs) {
+      const bool two = r + rs < r1;
+      float zv[2][8], dA[2][8];
+      ld8(P.z + int64_t(r) * s.C + c, zv[0]);
+      if (two) ld8(P.z + int64_t(r + rs) * s.C + c, zv[1]);
+      if (MODE == 1) {
+        gather8(P.dl, r, c, s.H, s.W, dA[0]);
+        if (two) gather8(P.dl, r + rs, c, s.H, s.W, dA[1]);
+      }
+      for (int u = 0; u < 2; u++) {
+        if (u && !two) break;
+        if (MODE == 0) {
+          for (int i = 0; i < 8; i++) { float d = zv[u][i] - K[i]; a[i] += d; b[i] += d * d; }
+        } else {
+          for (int i = 0; i < 8; i++) {
+            float g = dA[u][i];
+            if (P.act) { float y = sc[i] * zv[u][i] + sh[i], sg = sigm(y); g *= sg * (1.f + y * (1.f - sg)); }
+            a[i] += g;
+            b[i] += g * (zv[u][i] - mu[i]) * is[i];
+          }
         }
       }
     }
@@ -149,7 +159,8 @@ __global__ void __launch_bounds__(kT) k_reduce(RedArgs P) {
   for (int ch = threadIdx.x; ch < s.C; ch += blockDim.x) {
     float2 acc = make_float2(0.f, 0.f);
     for (int k = 0; k < P.g.rowlanes; k++) { float2 v = sm[k * s.C + ch]; acc.x += v.x; acc.y += v.y; }
-    P.part[int64_t(blockIdx.x) * s.C + ch] = acc;
+    atomicAdd(&P.acc[ch], double(acc.x));
+    atomicAdd(&P.acc[s.C + ch], double(acc.y));
   }
   // 마지막 블록이 마무리
   __shared__ bool last;
@@ -161,16 +172,13 @@ __global__ void __launch_bounds__(kT) k_reduce(RedArgs P) {
   __threadfence();
   const double Md = double(M);
   for (int ch = threadIdx.x; ch < s.C; ch += blockDim.x) {
-    float sx = 0.f, sy = 0.f, cx = 0.f, cy = 0.f;  // Kahan
-    for (int k = 0; k < gridDim.x; k++) {
-      float2 v = __ldcg(&P.part[int64_t(k) * s.C + ch]);
-      float yx = v.x - cx, tx = sx + yx; cx = (tx - sx) - yx; sx = tx;
-      float yy = v.y - cy, ty = sy + yy; cy = (ty - sy) - yy; sy = ty;
-    }
+    const double sx = __ldcg(&P.acc[ch]), sy = __ldcg(&P.acc[s.C + ch]);
+    P.acc[ch] = 0.0;
+    P.acc[s.C + ch] = 0.0;
     if (MODE == 0) {
       float Kc = P.run_mean[ch];
-      float dm = float(double(sx) / Md);
-      float var = float(double(sy) / Md - double(dm) * dm);
+      float dm = float(sx / Md);
+      float var = float(sy / Md - double(dm) * dm);
       if (var < 0.f) var = 0.f;
       float m = Kc + dm;
       float isd = rsqrtf(var + P.eps);
@@ -184,10 +192,10 @@ __global__ void __launch_bounds__(kT) k_reduce(RedArgs P) {
         P.run_var[ch] = (1.f - P.mom) * P.run_var[ch] + P.mom * float(double(var) * Md / (Md - 1.0));
       }
     } else {
-      P.sums[ch] = float(double(sx) / Md);
-      P.sums[s.C + ch] = float(double(sy) / Md);
-      if (P.accum) { P.gw_beta[ch] += sx; P.gw_gamma[ch] += sy; }
-      else { P.gw_beta[ch] = sx; P.gw_gamma[ch] = sy; }
+      P.sums[ch] = float(sx / Md);
+      P.sums[s.C + ch] = float(sy / Md);
+      if (P.accum) { P.gw_beta[ch] += float(sx); P.gw_gamma[ch] += float(sy); }
+      else { P.gw_beta[ch] = float(sx); P.gw_gamma[ch] = float(sy); }
     }
   }
   if (threadIdx.x == 0) *P.counter = 0u;
@@ -275,17 +283,25 @@ __global__ void k_eval_scale(int C, const float* g, const float* b, const float*
   shift[c] = b[c] - rm[c] * sc;
 }
 
-unsigned* counter() {  // 마지막 블록 판정용(커널이 끝에 0 으로 되돌린다; 한 스트림에서 차례로 쓴다)
+constexpr int kMaxC = kT * kV;  // C/kV ≤ kT
+// 마지막 블록 판정 카운터와 채널 누산기(커널이 끝에 0 으로 되돌린다; 한 스트림에서 차례로 쓴다)
+unsigned* counter() {
   static unsigned* c = nullptr;
   if (!c) { CUDA_CHECK(cudaMalloc(&c, sizeof(unsigned))); CUDA_CHECK(cudaMemset(c, 0, sizeof(unsigned))); }
   return c;
 }
+double* accum_buf() {
+  static double* a = nullptr;
+  if (!a) {
+    CUDA_CHECK(cudaMalloc(&a, 2 * kMaxC * sizeof(double)));
+    CUDA_CHECK(cudaMemset(a, 0, 2 * kMaxC * sizeof(double)));
+  }
+  return a;
+}
 
 }  // namespace
 
-void bn_init() { counter(); }
-
-int bn_partial_blocks(const BnShape& s) { return geo(s).nblk; }
+void bn_init() { counter(); accum_buf(); }
 
 void bn_eval_scale(int C, const float* gamma, const float* beta, const float* run_mean, const float* run_var, float eps,
                    float* scale, float* shift, cudaStream_t st) {
@@ -293,14 +309,14 @@ void bn_eval_scale(int C, const float* gamma, const float* beta, const float* ru
 }
 
 void bn_forward_stats(const act_t* z, const BnShape& s, const float* gamma, const float* beta, float* run_mean,
-                      float* run_var, float momentum, float eps, float2* partial, float* mean, float* istd,
+                      float* run_var, float momentum, float eps, float* mean, float* istd,
                       float* scale, float* shift, cudaStream_t st) {
   FSO_ASSERT(s.C % kV == 0 && s.C / kV <= kT, "BN channels %d", s.C);
   RedArgs P{};
   P.z = z; P.s = s; P.g = geo(s);
   P.gamma = gamma; P.beta = beta; P.run_mean = run_mean; P.run_var = run_var; P.mom = momentum; P.eps = eps;
   P.mean = mean; P.istd = istd; P.scale = scale; P.shift = shift;
-  P.part = partial; P.counter = counter();
+  P.acc = accum_buf(); P.counter = counter();
   size_t shm = size_t(P.g.rowlanes) * s.C * sizeof(float2);
   k_reduce<0><<<P.g.nblk, kT, shm, st>>>(P);
 }
@@ -311,7 +327,7 @@ void bn_forward_apply(const act_t* z, const BnShape& s, const float* scale, cons
 }
 
 void bn_backward(const act_t* z, const BnShape& s, const float* gamma, const float* mean, const float* istd,
-                 const float* scale, const float* shift, const DestList& dl, bool act, float2* partial, float* sums,
+                 const float* scale, const float* shift, const DestList& dl, bool act, float* sums,
                  act_t* dz, float* gw_gamma, float* gw_beta, bool accum, act_t* res_grad, bool res_accum,
                  cudaStream_t st) {
   (void)gamma;
@@ -320,7 +336,7 @@ void bn_backward(const act_t* z, const BnShape& s, const float* gamma, const flo
   P.scale = const_cast<float*>(scale); P.shift = const_cast<float*>(shift);
   P.mean = const_cast<float*>(mean); P.istd = const_cast<float*>(istd);
   P.dl = dl; P.act = act; P.sums = sums; P.gw_gamma = gw_gamma; P.gw_beta = gw_beta; P.accum = accum;
-  P.part = partial; P.counter = counter();
+  P.acc = accum_buf(); P.counter = counter();
   size_t shm = size_t(P.g.rowlanes) * s.C * sizeof(float2);
   k_reduce<1><<<P.g.nblk, kT, shm, st>>>(P);
   k_bwd_apply<<<grid_for(s.M() * s.C / kV), kT, 0, st>>>(z, s, mean, istd, scale, shift, sums, dl, act, dz, res_grad,

@@ -288,8 +288,6 @@ void Model::build(const ModelCfg& c, cudnnHandle_t h, cudaStream_t st) {
       int64_t e = nd->conv.out_elems();
       nd->z = dalloc<act_t>(e);
       max_z = std::max(max_z, e);
-      BnShape s{cfg.batch, nd->conv.geom().P(), nd->conv.geom().Q(), nd->K};
-      max_part = std::max<int64_t>(max_part, int64_t(bn_partial_blocks(s)) * nd->K * 2);
       max_c = std::max<int64_t>(max_c, nd->K);
       nd->mean = dalloc<float>(nd->K);
       nd->istd = dalloc<float>(nd->K);
@@ -300,9 +298,9 @@ void Model::build(const ModelCfg& c, cudnnHandle_t h, cudaStream_t st) {
       max_part = std::max<int64_t>(max_part, int64_t(chan_sum_blocks(M, nd->K)) * nd->K);
     }
   }
-  dz_ = dalloc<act_t>(max_z);
-  part_ = reinterpret_cast<float2*>(dalloc<float>(max_part));
-  chpart_ = reinterpret_cast<float*>(part_);
+  dz_[0] = dalloc<act_t>(max_z);
+  dz_[1] = dalloc<act_t>(max_z);
+  chpart_ = dalloc<float>(max_part);
   sums_ = dalloc<float>(2 * max_c);
   {
     int64_t e = N * sp->H * sp->W * 256;
@@ -321,18 +319,30 @@ void Model::build(const ModelCfg& c, cudnnHandle_t h, cudaStream_t st) {
     act_t* w = params.wact(nd->wnames[0]);
     act_t* gw = params.gwact(nd->wnames[0]);
     act_t* y = nd->kind == Node::CONVBN ? nd->z : nd->out->p;
-    act_t* dy = nd->kind == Node::CONVBN ? dz_ : nd->out->g;
+    act_t* dy = nd->kind == Node::CONVBN ? dz_[0] : nd->out->g;
     act_t* dx = nd->in->g;
     if (!dx) {
       if (!scratch_dx) CUDA_CHECK(cudaMalloc(&scratch_dx, N * nd->in->H * nd->in->W * nd->in->C * sizeof(act_t)));
       dx = scratch_dx;
     }
-    need = std::max(need, nd->conv.tune(nd->in->p, w, y, dx, gw, dy, tws, lim));
+    need = std::max(need, nd->conv.tune(nd->in->p, w, y, dx, gw, dy, tws, lim, nd->dgrad_accum ? 1.f : 0.f));
   }
   CUDA_CHECK(cudaFree(tws));
   if (scratch_dx) CUDA_CHECK(cudaFree(scratch_dx));
   ws_bytes = need;
   ws_ = DevMem::alloc(need);
+  ws_side_ = DevMem::alloc(need);
+  {
+    int lo, hi;  // 곁 스트림(wgrad)은 가장 낮은 우선순위: 주 스트림(BN 역방향·dgrad, 임계 경로)이 먼저
+    CUDA_CHECK(cudaDeviceGetStreamPriorityRange(&lo, &hi));
+    CUDA_CHECK(cudaStreamCreateWithPriority(&side_, cudaStreamNonBlocking, lo));
+  }
+  for (int i = 0; i < 2; i++) {
+    CUDA_CHECK(cudaEventCreateWithFlags(&ev_dz_[i], cudaEventDisableTiming));
+    CUDA_CHECK(cudaEventCreateWithFlags(&ev_wg_[i], cudaEventDisableTiming));
+  }
+  CUDA_CHECK(cudaEventCreateWithFlags(&ev_fork_, cudaEventDisableTiming));
+  CUDA_CHECK(cudaEventCreateWithFlags(&ev_join_, cudaEventDisableTiming));
 }
 
 void Model::plan_backward() {
@@ -382,7 +392,7 @@ void Model::forward(bool train) {
         float* rm = params.ptr(b + ".running_mean");
         float* rv = params.ptr(b + ".running_var");
         if (train)
-          bn_forward_stats(nd.z, s, g, be, rm, rv, cfg.bn_momentum, cfg.bn_eps, part_, nd.mean, nd.istd, nd.scale,
+          bn_forward_stats(nd.z, s, g, be, rm, rv, cfg.bn_momentum, cfg.bn_eps, nd.mean, nd.istd, nd.scale,
                            nd.shift, st_);
         else
           bn_eval_scale(nd.K, g, be, rm, rv, cfg.bn_eps, nd.scale, nd.shift, st_);
@@ -402,26 +412,48 @@ void Model::forward(bool train) {
   }
 }
 
+// 곁 스트림에서 wgrad: dy(버퍼 buf) 가 준비된 뒤 시작하고, 끝나면 ev_wg_[buf] 로 알린다.
+void Model::wgrad_side(Node& nd, const act_t* dy, int buf) {
+  CUDA_CHECK(cudaEventRecord(ev_dz_[buf], st_));
+  CUDA_CHECK(cudaStreamWaitEvent(side_, ev_dz_[buf], 0));
+  CUDNN_CHECK(cudnnSetStream(h_, side_));
+  nd.conv.wgrad(nd.in->p, dy, params.gwact(nd.wnames[0]), ws_side_, ws_bytes);
+  CUDNN_CHECK(cudnnSetStream(h_, st_));
+  CUDA_CHECK(cudaEventRecord(ev_wg_[buf], side_));
+}
+
 void Model::backward(bool accum) {
+  CUDA_CHECK(cudaEventRecord(ev_fork_, st_));
+  CUDA_CHECK(cudaStreamWaitEvent(side_, ev_fork_, 0));
+  bool busy[2] = {false, false};  // dz 버퍼를 읽는 wgrad 가 곁 스트림에 걸려 있나
+  int buf = 0;
   for (auto it = nodes_.rbegin(); it != nodes_.rend(); ++it) {
     Node& nd = **it;
     switch (nd.kind) {
       case Node::CONVBN: {
         BnShape s{cfg.batch, nd.conv.geom().P(), nd.conv.geom().Q(), nd.K};
         const std::string& b = nd.bnnames[0];
+        if (busy[buf]) CUDA_CHECK(cudaStreamWaitEvent(st_, ev_wg_[buf], 0));
         bn_backward(nd.z, s, params.ptr(b + ".weight"), nd.mean, nd.istd, nd.scale, nd.shift, mk_dl(nd, true), true,
-                    part_, sums_, dz_, params.gptr(b + ".weight"), params.gptr(b + ".bias"), accum,
+                    sums_, dz_[buf], params.gptr(b + ".weight"), params.gptr(b + ".bias"), accum,
                     nd.res ? nd.res->g : nullptr, nd.res_accum, st_);
-        nd.conv.wgrad(nd.in->p, dz_, params.gwact(nd.wnames[0]), ws_, ws_bytes);
+        wgrad_side(nd, dz_[buf], buf);
+        busy[buf] = true;
         if (nd.in->need_grad)
-          nd.conv.dgrad(dz_, params.wact(nd.wnames[0]), nd.in->g, ws_, ws_bytes, nd.dgrad_accum ? 1.f : 0.f);
+          nd.conv.dgrad(dz_[buf], params.wact(nd.wnames[0]), nd.in->g, ws_, ws_bytes, nd.dgrad_accum ? 1.f : 0.f);
+        buf ^= 1;
         break;
       }
       case Node::HEADCONV:
       case Node::CONVT: {
+        // dy = 출력 기울기 버퍼(이 뒤로 바뀌지 않는다): dz 버퍼 차례와 상관없이 곁 스트림에
         int64_t M = int64_t(cfg.batch) * nd.out->H * nd.out->W;
         chan_sum(nd.out->g, M, nd.K, chpart_, params.gptr(nd.bias), accum, st_);
-        nd.conv.wgrad(nd.in->p, nd.out->g, params.gwact(nd.wnames[0]), ws_, ws_bytes);
+        CUDA_CHECK(cudaEventRecord(ev_fork_, st_));
+        CUDA_CHECK(cudaStreamWaitEvent(side_, ev_fork_, 0));
+        CUDNN_CHECK(cudnnSetStream(h_, side_));
+        nd.conv.wgrad(nd.in->p, nd.out->g, params.gwact(nd.wnames[0]), ws_side_, ws_bytes);
+        CUDNN_CHECK(cudnnSetStream(h_, st_));
         if (nd.in->need_grad)
           nd.conv.dgrad(nd.out->g, params.wact(nd.wnames[0]), nd.in->g, ws_, ws_bytes, nd.dgrad_accum ? 1.f : 0.f);
         break;
@@ -431,6 +463,8 @@ void Model::backward(bool accum) {
         break;
     }
   }
+  CUDA_CHECK(cudaEventRecord(ev_join_, side_));
+  CUDA_CHECK(cudaStreamWaitEvent(st_, ev_join_, 0));
   act_accum_f32(params.gw_act, params.grad[P_W], params.size[P_W], accum, st_);
 }
 

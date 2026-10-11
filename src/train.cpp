@@ -118,7 +118,10 @@ int main(int argc, char** argv) {
   const int B = a.batch, S = a.imgsz;
 
   cudaStream_t cs, xs;  // 계산, 복사
-  CUDA_CHECK(cudaStreamCreateWithFlags(&cs, cudaStreamNonBlocking));
+  // 계산 스트림은 높은 우선순위: 모델의 곁 스트림(wgrad)이 남는 SM 을 채운다(Model::backward)
+  int prio_lo, prio_hi;
+  CUDA_CHECK(cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi));
+  CUDA_CHECK(cudaStreamCreateWithPriority(&cs, cudaStreamNonBlocking, prio_hi));
   CUDA_CHECK(cudaStreamCreateWithFlags(&xs, cudaStreamNonBlocking));
   cudnnHandle_t h;
   CUDNN_CHECK(cudnnCreate(&h));
