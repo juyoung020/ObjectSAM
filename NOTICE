@@ -1,0 +1,16 @@
+ObjectSAM
+Copyright (C) 2026 the ObjectSAM authors. Licensed under the GNU Affero General Public License v3.0 (see LICENSE).
+
+This work builds on:
+- FastSAM (Fast Segment Anything), CASIA-IVA-Lab - https://github.com/CASIA-IVA-Lab/FastSAM
+- Ultralytics YOLOv8 (AGPL-3.0) - https://github.com/ultralytics/ultralytics
+  The student network is YOLOv8s-seg (1 class), initialised from the Ultralytics yolov8s-seg COCO checkpoint.
+- CropFormer Hornet-L (Entity), Lu Qi et al. - https://github.com/qqlu/Entity
+  Code and weights are CC BY-NC 4.0. Training labels are produced by this teacher, so models trained on them are for
+  non-commercial research use only.
+- SigLIP2 (Google) for structure judgement of ambiguous teacher masks.
+
+Training data (not redistributed here): COCO train2017 images (Flickr licences) and COCO-panoptic / LVIS v1 annotations
+(CC BY 4.0). The uHumans2 evaluation data is not used for training in any form.
+
+The previous ObjectSAM (YOLO26n student, v1.0) is kept under archive/ with its own NOTICE.
