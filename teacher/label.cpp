@@ -6,6 +6,19 @@
 //   n × [f32 점수(물체 확률 × 마스크 점수), u32 넓이] (점수 내림차순 순위 순, 넓이 > 0 인 것만),
 //   u32 RLE 바이트 수, RLE: 행 우선으로 (값, 길이) 쌍을 LEB128 로. 값 0 = 마스크 없음, k = k-1 번 마스크.
 // 점수 기준은 나중에 정한다(여기서는 넓이 > 0 이면 모두 남긴다).
+//
+// --parts P (기본 꺼짐; FTL1 출력은 그대로): 겹치지 않는 id 지도에서 대부분 가려진 확신 있는 마스크(부품 후보)를 P 에 더 쓴다.
+//   후보 조건(tk.cuh PartCfg): 온전한(펴기 전, fused > 0.5) 마스크 점수 ≥ --part-score(0.5; 점수 = 물체 확률 × 온전한 마스크
+//   안 평균 sigmoid(확률), FTL 점수와 같은 식을 온전한 마스크에), 온전한 넓이 ≥ --part-min-area(100), 보이는 비율 < --part-max-vis
+//   (0.5), 온전한 마스크의 ≥ --part-inside(0.8) 가 앞 순위 마스크 하나(부모: FTL 점수 ≥ --parent-score 0.5)의 보이는 영역 안,
+//   부품 넓이 / 부모 보이는 넓이 ∈ [--part-rel-lo 0.01, --part-rel-hi 0.7]. 사진당 순위 순으로 최대 64 개.
+//   레코드(리틀 엔디언, 사진마다 하나, 후보 0 개여도): 'FTP2', u32 image_id, u16 H, u16 W, u16 n, u16 0,
+//   n × [u16 부모(FTL1 마스크 번호 = 넓이 > 0 순위 번호), u16 질의 순위(0..199, FTL1 에 없을 수 있음), f32 온전한 점수,
+//        u32 온전한 넓이, u32 보이는 넓이, f32 부모 안 비율, u32 RLE 바이트 수, RLE(부품의 온전한 마스크, 사진 해상도;
+//        pytools/coco_build.py 와 같음: 행 우선, 0 부터 교대 길이, LEB128)].
+// --lowmem: 백본을 화면 하나씩 돌리고 픽셀 디코더 뒤에 앞 단계 작업 버퍼를 놓는다(다른 학습과 GPU 를 나눠 쓸 때).
+//   GEMM 모양이 달라 결과가 비트 단위로 같지는 않다(fp16 흔들림 범위, docs/TEACHER.md).
+//   이어 하기는 P 를 기준으로 한다(--parts 를 줄 때 OUT 은 버리는 파일로 쓴다; pytools/ftl.py read_parts 로 읽는다).
 #include <turbojpeg.h>
 #include <unistd.h>
 
@@ -42,6 +55,9 @@ struct OutSlot {
   int* area = nullptr;
   uint32_t image_id = 0;
   int OH = 0, OW = 0;
+  PartInfo* pinfo = nullptr;
+  int* pn = nullptr;
+  unsigned long long* pbits = nullptr;
   cudaEvent_t ev;
 };
 struct Job {
@@ -128,6 +144,75 @@ std::string encode(uint32_t id, const OutSlot& r) {
   return head + body;
 }
 
+// 부품 후보 레코드(머리말 --parts).
+std::string encode_parts(const OutSlot& r) {
+  const int Q = TeacherNetT<__half, __half, __half>::kQ;
+  std::vector<int> remap(Q, -1);
+  for (int k = 0, n = 0; k < Q; k++)
+    if (r.area[k] > 0) remap[k] = n++;
+  std::string o("FTP2", 4);
+  auto put = [&](const void* p, size_t b) { o.append(static_cast<const char*>(p), b); };
+  uint32_t id = r.image_id;
+  uint16_t H = r.OH, W = r.OW, n = uint16_t(*r.pn), z = 0;
+  put(&id, 4), put(&H, 2), put(&W, 2), put(&n, 2), put(&z, 2);
+  size_t HW = size_t(H) * W;
+  for (int c = 0; c < n; c++) {
+    const PartInfo& pi = r.pinfo[c];
+    FSO_ASSERT(remap[pi.parent] >= 0, "parent without area");
+    uint16_t par = remap[pi.parent], rk = pi.rank;
+    uint32_t full = pi.full, vis = pi.vis;
+    put(&par, 2), put(&rk, 2), put(&pi.score, 4), put(&full, 4), put(&vis, 4), put(&pi.inside, 4);
+    std::string body;
+    unsigned long long m = 1ull << c;
+    bool cur = false;
+    size_t i = 0;
+    while (i < HW) {  // 0 부터 교대 길이
+      size_t j = i;
+      while (j < HW && bool(r.pbits[j] & m) == cur) j++;
+      leb(body, j - i);
+      cur = !cur;
+      i = j;
+    }
+    uint32_t nb = body.size();
+    put(&nb, 4);
+    o += body;
+  }
+  return o;
+}
+
+std::set<uint32_t> scan_parts(const std::string& path) {
+  std::set<uint32_t> done;
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return done;
+  std::vector<char> buf((std::istreambuf_iterator<char>(f)), {});
+  size_t p = 0, good = 0;
+  while (p + 16 <= buf.size()) {
+    if (memcmp(&buf[p], "FTP2", 4)) break;
+    uint32_t id;
+    uint16_t n;
+    memcpy(&id, &buf[p + 4], 4);
+    memcpy(&n, &buf[p + 12], 2);
+    size_t q = p + 16;
+    bool ok = true;
+    for (int c = 0; c < n && ok; c++) {
+      if (q + 24 > buf.size()) { ok = false; break; }
+      uint32_t nb;
+      memcpy(&nb, &buf[q + 20], 4);
+      q += 24 + nb;
+      if (q > buf.size()) ok = false;
+    }
+    if (!ok) break;
+    done.insert(id);
+    p = good = q;
+  }
+  f.close();
+  if (good != buf.size()) {
+    fprintf(stderr, "truncating %s: %zu → %zu bytes\n", path.c_str(), buf.size(), good);
+    FSO_ASSERT(truncate(path.c_str(), off_t(good)) == 0, "truncate");
+  }
+  return done;
+}
+
 // 이어 하기: 온전한 레코드의 image_id 를 모으고, 끝이 잘렸으면 그 앞까지로 자른다.
 std::set<uint32_t> scan(const std::string& path) {
   std::set<uint32_t> done;
@@ -160,8 +245,10 @@ std::set<uint32_t> scan(const std::string& path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::string weights = "weights/teacher/cropformer_hornet_l.fsow", list, out, prec = "half";
+  std::string weights = "weights/teacher/cropformer_hornet_l.fsow", list, out, prec = "half", parts;
+  PartCfg pc;
   int workers = 8;
+  bool lowmem = false;
   long limit = -1;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -175,6 +262,15 @@ int main(int argc, char** argv) {
     else if (a == "--workers") workers = std::stoi(next());
     else if (a == "--prec") prec = next();
     else if (a == "--limit") limit = std::stol(next());
+    else if (a == "--parts") parts = next();
+    else if (a == "--lowmem") lowmem = true;
+    else if (a == "--part-score") pc.score = std::stof(next());
+    else if (a == "--part-min-area") pc.min_area = std::stoi(next());
+    else if (a == "--part-max-vis") pc.max_vis = std::stof(next());
+    else if (a == "--part-inside") pc.inside = std::stof(next());
+    else if (a == "--part-rel-lo") pc.rel_lo = std::stof(next());
+    else if (a == "--part-rel-hi") pc.rel_hi = std::stof(next());
+    else if (a == "--parent-score") pc.parent_score = std::stof(next());
     else FSO_ASSERT(false, "unknown arg %s", a.c_str());
   }
   FSO_ASSERT(!list.empty() && !out.empty(), "need --list and --out");
@@ -191,6 +287,7 @@ int main(int argc, char** argv) {
     }
   }
   auto done = scan(out);
+  if (!parts.empty()) done = scan_parts(parts);  // 부품 파일이 기준(OUT 은 버리는 파일)
   std::vector<Item> todo;
   for (auto& it : items)
     if (!done.count(it.id)) todo.push_back(it);
@@ -215,6 +312,11 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMallocHost(&s.id, kMaxHW * sizeof(int16_t)));
     CUDA_CHECK(cudaMallocHost(&s.score, Net::kQ * sizeof(float)));
     CUDA_CHECK(cudaMallocHost(&s.area, Net::kQ * sizeof(int)));
+    if (!parts.empty()) {
+      CUDA_CHECK(cudaMallocHost(&s.pinfo, kMaxParts * sizeof(PartInfo)));
+      CUDA_CHECK(cudaMallocHost(&s.pn, sizeof(int)));
+      CUDA_CHECK(cudaMallocHost(&s.pbits, kMaxHW * sizeof(unsigned long long)));
+    }
     CUDA_CHECK(cudaEventCreateWithFlags(&s.ev, cudaEventDisableTiming));
   }
   Queue<int> free_in(kIn), free_out(kOut), written(kOut);
@@ -271,6 +373,12 @@ int main(int argc, char** argv) {
   std::thread writer([&] {
     std::ofstream f(out, std::ios::binary | std::ios::app);
     FSO_ASSERT(f.good(), "write %s", out.c_str());
+    std::ofstream fp;
+    if (!parts.empty()) {
+      fp.open(parts, std::ios::binary | std::ios::app);
+      FSO_ASSERT(fp.good(), "write %s", parts.c_str());
+    }
+    size_t nparts = 0;
     int si;
     size_t n = 0;
     auto t0 = std::chrono::steady_clock::now();
@@ -278,16 +386,22 @@ int main(int argc, char** argv) {
       OutSlot& s = outs[si];
       CUDA_CHECK(cudaEventSynchronize(s.ev));
       std::string rec = encode(s.image_id, s);
+      std::string prec_;
+      if (!parts.empty()) prec_ = encode_parts(s), nparts += *s.pn;
       free_out.push(si);
       f.write(rec.data(), rec.size());
+      if (!parts.empty()) fp.write(prec_.data(), prec_.size());
       if (++n % 100 == 0) {
         f.flush();
+        if (!parts.empty()) fp.flush();
         double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        fprintf(stderr, "%zu / %zu  %.3f s/img  eta %.1f h\n", n, todo.size(), sec / n, sec / n * (todo.size() - n) / 3600);
+        fprintf(stderr, "%zu / %zu  %.3f s/img  eta %.1f h  parts %.2f/img\n", n, todo.size(), sec / n,
+                sec / n * (todo.size() - n) / 3600, double(nparts) / n);
       }
     }
     f.flush();
-    fprintf(stderr, "wrote %zu records\n", n);
+    if (!parts.empty()) fp.flush();
+    fprintf(stderr, "wrote %zu records, %zu parts\n", n, nparts);
   });
 
   // GPU: 사진 하나씩 스트림에 넣기만 하고(호스트와 맞추지 않음) 다음으로 넘어간다.
@@ -301,15 +415,19 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemcpyAsync(xd, in.x, n * sizeof(__half), cudaMemcpyHostToDevice, net.st));
     CUDA_CHECK(cudaEventRecord(in.ev, net.st));
     free_in.push(j.slot);
-    net.backbone(xd);
+    if (lowmem) net.backbone_per_view(xd);
+    else net.backbone(xd);
     net.pixel_decoder();
+    if (lowmem) net.release_scratch();
     net.decoder();
+    if (lowmem) net.release_scratch(true);
     int oi;
     free_out.pop(oi);
     OutSlot& o = outs[oi];
     o.image_id = j.id, o.OH = j.pr.g.OH, o.OW = j.pr.g.OW;
     FSO_ASSERT(size_t(o.OH) * o.OW <= kMaxHW, "image too large");
     net.postprocess_async(j.pr.g, o.id, o.score, o.area);
+    if (!parts.empty()) net.parts_async(j.pr.g, pc, o.pinfo, o.pn, o.pbits);
     CUDA_CHECK(cudaEventRecord(o.ev, net.st));
     written.push(oi);
   }

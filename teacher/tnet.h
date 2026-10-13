@@ -1,6 +1,8 @@
 // CropFormer Hornet-L(선생) 추론: 백본(HorNet-L) → 픽셀 디코더(MSDeformAttn 6 층 + FPN) → 디코더(2d 9 층, 3d 질의, 3d 9 층)
 // → 후처리(5 화면 융합, 겹치지 않는 마스크). 원본: third_party/.../CropFormer, 기준값: pytools/teacher_dump.py.
 #pragma once
+#include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <string>
 #include <tuple>
@@ -11,6 +13,7 @@
 #include "tk.cuh"
 
 // 장치 버퍼: 더 큰 크기가 필요할 때만 다시 잡는다.
+inline size_t g_dbuf_held = 0;  // 지금 잡고 있는 DBuf 바이트 합(진단용, TEACHER_MEMLOG)
 struct DBuf {
   void* p = nullptr;
   size_t cap = 0;
@@ -19,10 +22,21 @@ struct DBuf {
     if (b > cap) {
       CUDA_CHECK(cudaDeviceSynchronize());  // 앞서 넣은 일이 옛 버퍼를 다 쓸 때까지
       if (p) CUDA_CHECK(cudaFree(p));
+      g_dbuf_held += b - cap;
+      if (getenv("TEACHER_MEMLOG") && b > (32 << 20)) {
+        size_t fr, tt;
+        cudaMemGetInfo(&fr, &tt);
+        fprintf(stderr, "alloc %zu MB  held %zu MB  free %zu MB\n", b >> 20, g_dbuf_held >> 20, fr >> 20);
+      }
       CUDA_CHECK(cudaMalloc(&p, b));
       cap = b;
     }
     return static_cast<T*>(p);
+  }
+  void release() {
+    if (p) CUDA_CHECK(cudaFree(p));
+    g_dbuf_held -= cap;
+    p = nullptr, cap = 0;
   }
 };
 
@@ -51,6 +65,13 @@ class TeacherNetT {
   // 호스트와 맞추지 않고 스트림에 넣기만 한다: 결과(id [OH·OW], 순위별 점수·넓이 [kQ])를 고정(pinned) 호스트 메모리로 복사.
   // 끝났는지는 호출한 쪽이 이 뒤에 기록한 이벤트로 안다.
   void postprocess_async(const ViewGeom& g, int16_t* h_id, float* h_score, int* h_area);
+  // postprocess_async 바로 뒤에(같은 버퍼): 부품 후보(tk.cuh PartCfg)를 고정 호스트 메모리로. h_bits [OH·OW].
+  // 메모리 아끼기(teacher_label --lowmem): 픽셀 디코더 뒤에 부르면 백본·픽셀 디코더 작업 버퍼를 놓아 디코더 최고 사용량을 줄인다.
+  // decoder_too: 디코더 뒤에 부르면 디코더 작업 버퍼도. 호스트와 맞춘다(다음 사진에서 다시 잡는다).
+  void release_scratch(bool decoder_too = false);
+  // 백본을 화면 하나씩(같은 결과 모양, 작업 메모리 1/T; 백본에는 화면 사이 상호작용이 없다).
+  void backbone_per_view(const AB* x);
+  void parts_async(const ViewGeom& g, const PartCfg& cfg, PartInfo* h_info, int* h_n, unsigned long long* h_bits);
 
   cudaStream_t st = nullptr;
   cublasHandle_t blas = nullptr;
@@ -111,6 +132,7 @@ class TeacherNetT {
   DBuf b_dsrc[3], b_kin2[3], b_kin3[3], b_mfl[3];
   DBuf b_out2, b_out2a, b_out3, b_out3a, b_qin, b_kin, b_me, b_ml, b_Qp, b_K, b_V, b_S, b_P, b_O, b_dn, b_post, b_order,
       b_id, b_ms_, b_area, b_p, b_score;
+  DBuf b_pfull, b_pssum, b_pinter, b_pinfo, b_pn, b_pbits;
 };
 
 using TeacherFP32 = TeacherNetT<float, float, float>;     // 정합성 시험

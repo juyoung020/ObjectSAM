@@ -1,0 +1,9 @@
+images sampled 3189 (every 10 among images containing these stuff classes)
+class | segs | multi-CC(≥2 pieces ≥200px) | mean pieces | teacher part masks/seg (v5 keep-parts 조건) | segs with ≥1 part
+cabinet-merged | 735 | 45% | 1.87 | 1.09 | 47%
+curtain | 506 | 36% | 1.55 | 0.70 | 36%
+door-stuff | 893 | 31% | 1.48 | 0.41 | 24%
+light | 1110 | 46% | 2.09 | 0.68 | 38%
+shelf | 434 | 45% | 1.94 | 2.70 | 70%
+window-blind | 209 | 36% | 1.57 | 0.43 | 26%
+window-other | 1405 | 47% | 2.11 | 0.54 | 25%

@@ -40,6 +40,8 @@ struct Args {
   float mosaic = 1.f;
   // 선생 라벨에서 바로(docs/LABELS.md). teacher 가 있으면 --shards 대신.
   std::string teacher, plan, siglip, exclude = "data/coco_shards/val_image_ids.json";
+  std::string extra_shards;
+  std::string oversample; int oversample_k = 2; float cls_gain = -1; int nbs = 64;  // --nbs: 명목 배치(누적 = nbs/batch)  // 2 배로 뽑을 image_id 목록 파일  // 선생 라벨과 함께 섞을 샤드(FSR3, 예: 옛 ADE·시뮬 data/old_shards/*.bin)
   float score_thr = 0.5f, siglip_thr = 0.8f;
 };
 
@@ -66,8 +68,13 @@ Args parse(int argc, char** argv) {
     else if (k == "--mosaic") a.mosaic = std::stof(v());
     else if (k == "--teacher") a.teacher = v();
     else if (k == "--plan") a.plan = v();
+    else if (k == "--extra-shards") a.extra_shards = v();
     else if (k == "--siglip") a.siglip = v();
     else if (k == "--exclude") a.exclude = v();
+    else if (k == "--oversample") a.oversample = v();
+    else if (k == "--oversample-k") a.oversample_k = std::stoi(v());
+    else if (k == "--cls-gain") a.cls_gain = std::stof(v());
+    else if (k == "--nbs") a.nbs = std::stoi(v());
     else if (k == "--score-thr") a.score_thr = std::stof(v());
     else if (k == "--siglip-thr") a.siglip_thr = std::stof(v());
     else FSO_ASSERT(false, "unknown arg %s", k.c_str());
@@ -113,7 +120,8 @@ int main(int argc, char** argv) {
   signal(SIGINT, on_sig);
   signal(SIGTERM, on_sig);
   std::filesystem::create_directories(a.out);
-  auto shards = a.teacher.empty() ? glob_files(a.shards) : std::vector<std::string>{};
+  auto shards = a.teacher.empty() ? glob_files(a.shards)
+                                  : (a.extra_shards.empty() ? std::vector<std::string>{} : glob_files(a.extra_shards));
   FSO_ASSERT(!a.teacher.empty() || !shards.empty(), "no shards: %s", a.shards.c_str());
   const int B = a.batch, S = a.imgsz;
 
@@ -131,7 +139,7 @@ int main(int argc, char** argv) {
   DataCfg dc;
   dc.shards = shards;
   dc.batch = B; dc.imgsz = S; dc.workers = a.workers; dc.seed = a.seed; dc.mosaic = a.mosaic;
-  dc.teacher_ftl = a.teacher; dc.teacher_plan = a.plan; dc.teacher_siglip = a.siglip; dc.exclude_ids = a.exclude;
+  dc.teacher_ftl = a.teacher; dc.teacher_plan = a.plan; dc.teacher_siglip = a.siglip; dc.exclude_ids = a.exclude; dc.oversample_ids = a.oversample; dc.oversample_k = a.oversample_k;
   dc.score_thr = a.score_thr; dc.siglip_thr = a.siglip_thr;
   Dataset ds;
   ds.open(dc);
@@ -146,12 +154,13 @@ int main(int argc, char** argv) {
   m.sync_weights();
   LossCfg lc;
   lc.B = B; lc.imgsz = S; lc.G = a.G; lc.reg_max = m.cfg.reg_max;
+  if (a.cls_gain > 0) lc.cls_gain = a.cls_gain;   // --cls-gain(기본 0.5, 2026-10-12 실험용)
   for (int l = 0; l < 3; l++) { lc.lvl_h[l] = m.head(0, l)->H; lc.lvl_w[l] = m.head(0, l)->W; }
   lc.Hp = m.proto()->H; lc.Wp = m.proto()->W;
   SegLoss sl;
   sl.init(lc);
   OptCfg oc;
-  oc.lr0 = a.lr0; oc.lrf = a.lrf; oc.warmup_epochs = a.warmup_epochs; oc.cos_lr = a.cos_lr; oc.epochs = a.epochs; oc.nb = nb; oc.batch = B;
+  oc.lr0 = a.lr0; oc.lrf = a.lrf; oc.warmup_epochs = a.warmup_epochs; oc.cos_lr = a.cos_lr; oc.epochs = a.epochs; oc.nb = nb; oc.batch = B; oc.nbs = a.nbs;
 #ifdef FSO_FP32
   oc.loss_scaling = false;
 #endif
@@ -171,6 +180,9 @@ int main(int argc, char** argv) {
     ni0 = os.ni;
     last_opt = int64_t(R.at("host.last_opt").f32()[0]);
     m.sync_weights();
+    // --max-steps 로 멈춘 곳이 기울기 누적 그룹 중간이면(마지막 그룹이 짧아 스텝 없이 끝남) 그 누적은 저장되지 않았다 →
+    // 새 그룹을 여기서 시작한다(2026-10-12, 마지막 구간 mosaic 끄기용 이어 하기).
+    if (ni0 - last_opt != 1) { printf("resume: 누적 중간(ni %ld, last_opt %ld) — 새 그룹으로 시작\n", ni0, last_opt); last_opt = ni0 - 1; }
     printf("resumed %s at iteration %ld (epoch %ld)\n", a.resume.c_str(), ni0, ni0 / nb);
   }
 
@@ -253,11 +265,11 @@ int main(int argc, char** argv) {
   const int64_t total = a.max_steps > 0 ? std::min<int64_t>(ni0 + a.max_steps, int64_t(a.epochs) * nb)
                                         : int64_t(a.epochs) * nb;
   const int64_t nw = std::llround(std::min(double(a.warmup_epochs), double(std::max(a.epochs - 1, 0))) * nb);
-  printf("training: %d epochs × %ld batches (batch %d, nbs 64 → accumulate %d), warmup %ld iterations, lr0 %g\n",
-         a.epochs, nb, B, opt.accumulate(), nw, a.lr0);
+  printf("training: %d epochs × %ld batches (batch %d, nbs %d → accumulate %d), warmup %ld iterations, lr0 %g\n",
+         a.epochs, nb, B, a.nbs, opt.accumulate(), nw, a.lr0);
   // 누적 수: Ultralytics 와 같이 워밍업 동안 1 → nbs/batch. 이터레이션 ni 에서 ni − last_opt ≥ acc(ni) 이면 스텝.
   auto acc_at = [&](int64_t i) {
-    double f = i <= nw && nw > 0 ? 1.0 + (64.0 / B - 1.0) * double(i) / double(nw) : 64.0 / B;
+    double f = i <= nw && nw > 0 ? 1.0 + (double(a.nbs) / B - 1.0) * double(i) / double(nw) : double(a.nbs) / B;
     return std::max(1, int(std::lround(f)));
   };
   double t0 = now_s(), tlog = t0;

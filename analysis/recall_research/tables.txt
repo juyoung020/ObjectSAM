@@ -1,0 +1,148 @@
+### q1 (천장·벽 위 버려진 마스크)
+images 11326
+
+== ceil: images with that COCO structure: 1017 (9.0%)
+size | drop(case2/3) | siglip>=0.8 | kept(case4, siglip<0.8)   [per image with structure]
+<0.1%     |      2 (0.00) |     59 (0.06) |    916 (0.90)
+0.1-0.5%  |     20 (0.02) |     73 (0.07) |    329 (0.32)
+0.5-2%    |     94 (0.09) |     41 (0.04) |    121 (0.12)
+2-5%      |    164 (0.16) |     16 (0.02) |     22 (0.02)
+>=5%      |    584 (0.57) |      4 (0.00) |     10 (0.01)
+removed small(<2% img) per image 0.28416912487708945  of which drop 116 siglip 173
+per-image dist small removed: mean 0.28 median 0 p90 1 max 6, frac images >=1: 0.24
+drop small: cover stats [0.43997343 0.80277072 0.96811248]
+removed small pixels = 0.18% of pixels in these images
+
+== wall: images with that COCO structure: 4749 (41.9%)
+size | drop(case2/3) | siglip>=0.8 | kept(case4, siglip<0.8)   [per image with structure]
+<0.1%     |      4 (0.00) |    190 (0.04) |   7505 (1.58)
+0.1-0.5%  |    112 (0.02) |    183 (0.04) |   5054 (1.06)
+0.5-2%    |    343 (0.07) |    113 (0.02) |   1953 (0.41)
+2-5%      |    496 (0.10) |     38 (0.01) |    413 (0.09)
+>=5%      |   3611 (0.76) |     31 (0.01) |    164 (0.03)
+removed small(<2% img) per image 0.19898926089703095  of which drop 459 siglip 486
+per-image dist small removed: mean 0.20 median 0 p90 1 max 3, frac images >=1: 0.18
+drop small: cover stats [0.39752282 0.69193807 0.93367557]
+removed small pixels = 0.13% of pixels in these images
+
+### q2 (점수 0.2-0.5)
+per image: all 54.6  >=0.5 25.2  0.2-0.5 6.7  <0.2 22.7
+low masks with pixels 76049 per image 6.71
+size (img frac) pct 10/50/90: [7.31850117e-06 8.41627635e-05 9.54666667e-04]
+  0.0-0.1%: 6.07/img
+  0.1-0.5%: 0.51/img
+  0.5-2.0%: 0.11/img
+  2.0-5.0%: 0.02/img
+  5.0-100.0%: 0.01/img
+pixel share: in v1 ignore 56.7%, on COCO structure 20.8%, on COCO obj/stuff(non-structure) 56.7%, void 22.5%
+
+taught as background pixel share 43.3%
+enclosed-in-kept(부품/구멍 후보)         2.87/img  px 29.7%  bg-taught px share 34%
+struct(COCO 구조물 위)                 2.05/img  px 20.1%  bg-taught px share 91%
+outside(놓친 물체 후보)                  1.75/img  px 38.0%  bg-taught px share 32%
+between-kept(물체 사이 틈)              0.05/img  px 12.3%  bg-taught px share 24%
+outside & >=0.1%img: 0.22/img; with in_ignore<0.5: 0.07/img
+enclosed & >=0.1%img: 0.24/img; in_ignore<0.5 0.08/img
+score hist [2.22850079 2.11469186 2.37135794]
+
+### q3 (장당 정답·상한)
+targets/img v1: mean 23.5 median 15 p90 55 p99 118 max 188
+targets/img v10: mean 31.8 median 21 p90 72 p99 167 max 416
+images over max_inst_per_src 256: v1 0 v10 14
+n_kept 23.0 n_ex 0.45 n_ex10-added 8.27  drop 1.86 siglip 0.30
+v1: per mosaic sample GT kept mean 42.4 p99 155 max 355; of visible targets: <=2px dropped 2.5%, crop<10% dropped 3.1%, G=256 cap 0.02%
+v10: per mosaic sample GT kept mean 56.1 p99 208 max 480; of visible targets: <=2px dropped 2.9%, crop<10% dropped 2.6%, G=256 cap 0.34%
+v1 targets with min side <4px(native) 3.2%, <8px 13.3%, area<64px 14.0%, area<1600px(=uH2 scoring min at native) 66.5%
+
+### q4 (크기)
+COCO width median 640.0
+sqrt-area in MODEL INPUT px (percentiles [5, 10, 25, 50, 75, 90, 95])
+ train targets v1 (x s): [  4.   6.  11.  23.  55. 128. 200.]
+ train targets >= 64px only: [ 67.  71.  85. 121. 191. 288. 360.]  share of targets >=64px: 21.6%
+ uH2 obj GT @1024: [ 68.  72.  85. 118. 175. 238. 292.]
+     0-  32px: train  60.5%  uH2   0.0%  v9 tp-rate   0.0  n=0
+    32-  64px: train  18.0%  uH2   0.0%  v9 tp-rate   0.0  n=0
+    64-  96px: train   7.4%  uH2  33.6%  v9 tp-rate  67.0  n=4190
+    96- 128px: train   4.1%  uH2  22.1%  v9 tp-rate  73.9  n=2756
+   128- 192px: train   4.7%  uH2  24.1%  v9 tp-rate  74.6  n=3009
+   192- 256px: train   2.4%  uH2  12.4%  v9 tp-rate  76.0  n=1544
+   256- 384px: train   2.1%  uH2   6.5%  v9 tp-rate  80.1  n=816
+   384-2000px: train   0.8%  uH2   1.2%  v9 tp-rate  95.3  n=149
+ imgsz640 s U(.5,1.5): targets>=64px per img-equivalent 5.1, median 121, p90 288
+ imgsz640 s U(.8,2.0): targets>=64px per img-equivalent 6.9, median 130, p90 356
+ imgsz1024 (=x1.6) s U(.5,1.5): targets>=64px per img-equivalent 7.7, median 134, p90 391
+input-px sqrt-area bin | FS01 tp%/merged%/missed% | v1_01 tp%/merged%/missed% | v9_01 tp%/merged%/missed% | v5_01 tp%/merged%/missed%
+64-96: 72.9/ 8.8/12.9 (n4443) | 69.7/12.3/13.4 (n4017) | 67.0/12.9/14.6 (n4190) | 60.4/15.0/20.0 (n4072)
+96-128: 81.7/ 5.5/ 3.1 (n2842) | 76.5/11.3/ 3.9 (n2646) | 73.9/11.1/ 3.8 (n2756) | 74.1/13.6/ 5.5 (n2577)
+128-192: 77.3/ 8.4/ 2.0 (n3181) | 75.2/14.3/ 3.4 (n2931) | 74.6/15.0/ 2.0 (n3009) | 77.5/12.9/ 3.3 (n2933)
+192-256: 85.2/ 2.6/ 0.4 (n1659) | 72.9/ 8.2/11.0 (n1512) | 76.0/ 7.1/ 5.8 (n1544) | 74.7/ 7.3/ 7.9 (n1472)
+256-384: 89.9/ 0.7/ 0.1 (n872) | 80.4/ 1.6/ 7.0 (n812) | 80.1/ 2.0/ 4.8 (n816) | 81.4/ 3.4/ 3.9 (n785)
+384-5000: 95.5/ 0.0/ 0.0 (n157) | 96.6/ 0.0/ 1.3 (n149) | 95.3/ 0.0/ 1.3 (n149) | 99.3/ 0.0/ 0.7 (n138)
+FS01 [('tp', 10370), ('merged', 862), ('missed', 735), ('low_iou', 734), ('split', 453)]
+v1_01 [('tp', 8926), ('merged', 1349), ('missed', 967), ('low_iou', 558), ('split', 267)]
+v9_01 [('tp', 9056), ('merged', 1423), ('missed', 906), ('low_iou', 816), ('split', 263)]
+v5_01 [('tp', 8518), ('merged', 1475), ('missed', 1204), ('low_iou', 598), ('split', 182)]
+scale U(0.5,1.5) mosaic=1: per 640 sample: targets in 64-384px band 8.8 (truncated 61%), <64px 33.3, >=384px 0.06
+scale U(0.8,2.0) mosaic=1: per 640 sample: targets in 64-384px band 7.5 (truncated 70%), <64px 17.5, >=384px 0.15
+scale U(1.0,2.2) mosaic=1: per 640 sample: targets in 64-384px band 6.8 (truncated 72%), <64px 13.2, >=384px 0.20
+scale U(0.5,1.5) mosaic=0: per 640 sample: targets in 64-384px band 4.7 (truncated 22%), <64px 17.1, >=384px 0.15
+scale U(1.0,2.2) mosaic=0: per 640 sample: targets in 64-384px band 5.9 (truncated 52%), <64px 11.4, >=384px 0.44
+
+### 범주별
+seq,cls | n(FS) | FS | v1(100ep) | v9(5ep) | v5(10ep,human)
+('apa', 'wall') | 2000 | 66.1 (m 20 x  3 l  9) | 53.8 (m 36 x  6 l  4) | 52.3 (m 36 x  6 l  6) | 53.2 (m 41 x  3 l  4)
+('off', 'screens') | 953 | 79.3 (m  1 x  5 l  7) | 72.3 (m  6 x  2 l 13) | 70.8 (m  5 x  2 l 18) | 69.1 (m  9 x  7 l 14)
+('off', 'appliance') | 899 | 88.9 (m  1 x  4 l  4) | 49.7 (m  1 x 36 l 13) | 59.2 (m  1 x 23 l 16) | 45.8 (m  9 x 27 l 17)
+('off', 'unknown') | 890 | 94.6 (m  2 x  2 l  1) | 85.9 (m  2 x  8 l  4) | 81.5 (m  3 x  8 l  8) | 51.8 (m  2 x 43 l  3)
+('off', 'chair') | 833 | 87.5 (m  2 x  4 l  5) | 94.1 (m  1 x  3 l  3) | 93.4 (m  1 x  3 l  2) | 94.0 (m  1 x  2 l  2)
+('apa', 'furniture') | 832 | 60.3 (m 21 x  7 l  6) | 60.6 (m 36 x  2 l  1) | 58.5 (m 38 x  2 l  1) | 74.8 (m 23 x  1 l  1)
+('off', 'table') | 758 | 75.6 (m  3 x  8 l  5) | 77.3 (m 12 x  3 l  2) | 75.0 (m 11 x  3 l  5) | 78.4 (m  7 x  3 l  4)
+('off', 'computer') | 662 | 59.8 (m  2 x 25 l  8) | 69.5 (m  1 x 20 l  6) | 69.4 (m  2 x 20 l  5) | 64.8 (m  7 x 19 l  5)
+('apa', 'chair') | 656 | 74.1 (m  7 x  7 l  7) | 72.7 (m  7 x  5 l  7) | 72.1 (m  9 x  5 l  8) | 72.9 (m  8 x  6 l  8)
+('off', 'furniture') | 624 | 79.3 (m  2 x  3 l 12) | 83.0 (m  3 x  1 l  8) | 75.3 (m  5 x  1 l 13) | 85.3 (m  8 x  2 l  4)
+('off', 'lamp') | 593 | 81.3 (m  3 x  7 l  8) | 74.9 (m  0 x 20 l  5) | 65.3 (m  0 x 28 l  6) | 66.6 (m  0 x 23 l 10)
+('off', 'couch') | 523 | 90.2 (m  0 x  0 l  2) | 99.4 (m  0 x  0 l  0) | 98.4 (m  0 x  0 l  0) | 99.1 (m  0 x  0 l  0)
+('apa', 'unknown') | 381 | 97.6 (m  1 x  2 l  0) | 94.9 (m  3 x  1 l  1) | 95.9 (m  3 x  1 l  1) | 94.5 (m  3 x  3 l  0)
+('apa', 'table') | 328 | 91.8 (m  4 x  3 l  0) | 90.2 (m  8 x  1 l  1) | 90.4 (m  6 x  2 l  1) | 89.6 (m  5 x  5 l  1)
+('off', 'trashcan') | 323 | 89.2 (m  0 x  2 l  3) | 92.0 (m  0 x  1 l  1) | 93.0 (m  0 x  0 l  1) | 94.9 (m  0 x  1 l  0)
+('apa', 'lamp') | 290 | 93.4 (m  1 x  6 l  0) | 92.7 (m  6 x  1 l  0) | 93.6 (m  6 x  0 l  0) | 93.8 (m  6 x  0 l  0)
+('apa', 'bed') | 265 | 72.5 (m 16 x  4 l  7) | 38.5 (m 58 x  2 l  2) | 44.0 (m 48 x  2 l  5) | 47.6 (m 52 x  0 l  0)
+('apa', 'books') | 243 | 52.3 (m 16 x 30 l  2) | 57.5 (m  0 x 38 l  4) | 48.5 (m  1 x 40 l  9) | 24.5 (m  0 x 69 l  6)
+('off', 'plant') | 215 | 73.0 (m  0 x 13 l 13) | 94.7 (m  2 x  1 l  2) | 94.1 (m  1 x  1 l  3) | 92.8 (m  3 x  1 l  4)
+('off', 'human') | 206 | 99.0 (m  0 x  0 l  0) | 99.5 (m  0 x  1 l  0) | 99.0 (m  0 x  1 l  0) | 98.9 (m  0 x  1 l  0)
+('apa', 'couch') | 187 | 94.1 (m  1 x  0 l  0) | 96.4 (m  1 x  2 l  0) | 95.4 (m  2 x  1 l  0) | 95.9 (m  3 x  0 l  0)
+('apa', 'stairs') | 122 | 100.0 (m  0 x  0 l  0) | 96.3 (m  0 x  3 l  1) | 95.6 (m  0 x  1 l  2) | 92.6 (m  0 x  2 l  5)
+
+### low_iou
+FS: low_iou 734 (5.6%) best_iou med 0.30; best-pred covers GT med 0.37; pred inside GT med 0.44
+    too-big(spills) 0.13  too-small(partial) 0.40  other 0.47
+    [(('apar', 'wall'), 178), (('offi', 'furniture'), 73), (('offi', 'screens'), 67), (('offi', 'computer'), 55), (('apar', 'furniture'), 54), (('apar', 'chair'), 47), (('offi', 'lamp'), 47), (('offi', 'chair'), 45)]
+    TP IoU median 0.867 mean 0.831
+v1: low_iou 558 (4.6%) best_iou med 0.31; best-pred covers GT med 0.37; pred inside GT med 0.39
+    too-big(spills) 0.06  too-small(partial) 0.40  other 0.54
+    [(('offi', 'screens'), 122), (('offi', 'appliance'), 100), (('apar', 'wall'), 78), (('offi', 'furniture'), 46), (('apar', 'chair'), 45), (('offi', 'computer'), 37), (('offi', 'unknown'), 29), (('offi', 'lamp'), 27)]
+    TP IoU median 0.898 mean 0.849
+v9: low_iou 816 (6.5%) best_iou med 0.30; best-pred covers GT med 0.38; pred inside GT med 0.42
+    too-big(spills) 0.07  too-small(partial) 0.41  other 0.51
+    [(('offi', 'screens'), 166), (('offi', 'appliance'), 133), (('apar', 'wall'), 120), (('offi', 'furniture'), 75), (('offi', 'unknown'), 65), (('apar', 'chair'), 53), (('offi', 'lamp'), 35), (('offi', 'computer'), 34)]
+    TP IoU median 0.864 mean 0.826
+
+### 예측·확신도
+FS01 kf 2985 preds/kf 42.1 {'ignore': 98493, 'tp': 10370, 'fp': 15718, 'tp_small': 972}
+   TP conf median 0.69  p25 0.44  share TP conf<0.2 0.03
+   conf 0.1-0.2: n/kf 3.5  {np.str_('ignore'): 8525, np.str_('fp'): 1378, np.str_('tp'): 336, np.str_('tp_small'): 103}
+   conf 0.2-0.4: n/kf 12.2  {np.str_('ignore'): 29799, np.str_('fp'): 4524, np.str_('tp'): 1776, np.str_('tp_small'): 284}
+   conf 0.4-1.01: n/kf 26.4  {np.str_('ignore'): 60169, np.str_('fp'): 9816, np.str_('tp'): 8258, np.str_('tp_small'): 585}
+   fp: struct_frac>0.5 share 0.00, median area 602
+v1_01 kf 2712 preds/kf 15.3 {'tp': 8926, 'ignore': 25809, 'fp': 6299, 'tp_small': 580}
+   TP conf median 0.67  p25 0.38  share TP conf<0.2 0.11
+   conf 0.1-0.2: n/kf 4.7  {np.str_('ignore'): 9115, np.str_('fp'): 2415, np.str_('tp'): 997, np.str_('tp_small'): 131}
+   conf 0.2-0.4: n/kf 3.8  {np.str_('ignore'): 6965, np.str_('fp'): 1915, np.str_('tp'): 1389, np.str_('tp_small'): 158}
+   conf 0.4-1.01: n/kf 6.8  {np.str_('ignore'): 9729, np.str_('tp'): 6540, np.str_('fp'): 1969, np.str_('tp_small'): 291}
+   fp: struct_frac>0.5 share 0.00, median area 771
+v9_01 kf 2773 preds/kf 17.4 {'ignore': 30391, 'tp': 9056, 'fp': 8008, 'tp_small': 688}
+   TP conf median 0.57  p25 0.30  share TP conf<0.2 0.14
+   conf 0.1-0.2: n/kf 6.6  {np.str_('ignore'): 13139, np.str_('fp'): 3593, np.str_('tp'): 1276, np.str_('tp_small'): 219}
+   conf 0.2-0.4: n/kf 4.6  {np.str_('ignore'): 8306, np.str_('fp'): 2318, np.str_('tp'): 1875, np.str_('tp_small'): 218}
+   conf 0.4-1.01: n/kf 6.2  {np.str_('ignore'): 8946, np.str_('tp'): 5905, np.str_('fp'): 2097, np.str_('tp_small'): 251}
+   fp: struct_frac>0.5 share 0.00, median area 777

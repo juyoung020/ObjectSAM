@@ -91,3 +91,11 @@ cmake --build build -j --target teacher_parity teacher_label
 build/teacher_parity weights/teacher/cropformer_hornet_l.fsow data/parity/teacher_ref_000000000164.fsow fp32
 build/teacher_label --list data/teacher/train2017.list --out data/teacher/train2017.ftl
 ```
+
+## 부품 후보(--parts, 2026-10-12 시험)
+
+`build/teacher_label ... --parts P.parts --lowmem`: 겹치지 않는 id 지도에서 대부분 가려진(보이는 비율 < 0.5) 확신 있는(온전한 점수 ≥ 0.5,
+≥ 100 px) 마스크 중 앞 순위 남는 마스크 안(≥ 80 %, 넓이 1–70 %)에 든 것을 'FTP2' 파일로 따로 쓴다(형식: `teacher/label.cpp` 머리말,
+읽기: `pytools/ftl.py read_parts`, 그림: `pytools/part_view.py`). FTL1 출력은 바뀌지 않는다. `--lowmem` 은 백본을 화면마다 돌리고
+작업 버퍼를 단계마다 놓아 학습과 GPU 를 나눠 쓸 수 있게 한다(남는 메모리 약 4.8 GB 에서 돈다, 저장된 라벨과 남는 마스크 평균 IoU 0.990).
+실내 50 장 시험(analysis/part_teacher/): 사진당 2.2 개, 대부분 벽·잡동사니 마스크의 조각이라 부품이 아님 → 전체 실행하지 않음.

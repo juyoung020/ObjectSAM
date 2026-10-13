@@ -1,0 +1,14 @@
+images 592 (indoor 242), every 200
+pixel split %: pos 62.6 struct 26.1 ignore 0.25 orphan(negative, non-struct) 11.1
+orphan px by teacher mask: dropped(score>=.5) 96.5% | 0.0 0.8% | 0.1 0.3% | 0.2 0.3% | 0.3 0.5% | 0.4 0.5% | 0.5 0.0% | no mask 1.1%
+teacher masks >=100px that are >=70% orphan (taught as background), per image:
+  dropped>=.5: all 0.46/img, indoor 0.38/img
+  s0.0: all 0.34/img, indoor 0.20/img
+  s0.1: all 0.12/img, indoor 0.10/img
+  s0.2: all 0.12/img, indoor 0.11/img
+  s0.3: all 0.15/img, indoor 0.19/img
+  s0.4: all 0.22/img, indoor 0.26/img
+  by area: {'dropped>=.5|big': 0.248, 'dropped>=.5|mid<5%': 0.086, 'dropped>=.5|small<1%': 0.13, 's0.0|mid<5%': 0.003, 's0.0|small<1%': 0.338, 's0.1|small<1%': 0.122, 's0.2|mid<5%': 0.003, 's0.2|small<1%': 0.118, 's0.3|mid<5%': 0.003, 's0.3|small<1%': 0.147, 's0.4|mid<5%': 0.005, 's0.4|small<1%': 0.211}
+INDOOR orphan px by panoptic class (top 25, % of indoor orphan px):
+  VOID 52.3, building-other-merged 21.8, tree-merged 7.8, sky-other-merged 5.2, fence-merged 4.2, rug-merged 2.6, house 2.4, food-other-merged 1.0, roof 0.7, flower 0.6, paper-merged 0.6, mountain-merged 0.2, bridge 0.2, fruit 0.1, rock-merged 0.1, tent 0.1, table-merged 0.0, water-other 0.0, river 0.0, counter 0.0, shelf 0.0, pillow 0.0, light 0.0, curtain 0.0, sea 0.0
+INDOOR orphan px from dropped masks by reason: {'frag/blob': '82.3%', 'struct': '12.1%'}

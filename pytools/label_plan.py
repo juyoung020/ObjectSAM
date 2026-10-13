@@ -24,6 +24,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ftl  # noqa: E402
 from coco_build import BG, leb128, rle_runs  # noqa: E402
 
+WCF = {n for n in BG if n.startswith(('wall', 'ceiling', 'floor'))} | {  # 벽·천장·바닥, 바깥 땅도 바닥
+    'road', 'pavement-merged', 'dirt-merged', 'sand', 'gravel', 'snow', 'grass-merged', 'playingfield', 'railroad', 'platform'}
+
 COCO = 'data/coco'
 _G = {}
 
@@ -50,6 +53,8 @@ def one(r):
     H, W = ids.shape
     isbg = {s['id']: _G['cats'][s['category_id']]['name'] in BG for s in x['segments_info']}
     area = {s['id']: s['area'] for s in x['segments_info']}
+    if a.simple:  # 벽·천장·바닥만, 다른 조건 없이(2026-10-11): 그 화소가 절반 이상이면 뺀다
+        isbg = {s['id']: _G['cats'][s['category_id']]['name'] in WCF for s in x['segments_info']}
     bg = np.isin(ids, [i for i, b in isbg.items() if b])
     obj = np.isin(ids, [i for i, b in isbg.items() if not b])
     m = ftl.idmap(r)
@@ -63,6 +68,13 @@ def one(r):
         if not mk.any():
             continue
         bgf = bg[mk].mean()
+        if a.simple:
+            if bgf >= a.bg_frac:
+                drop.append(int(k))
+                st['big'] += 1
+            else:
+                st['obj'] += 1
+            continue
         if bgf < a.bg_frac:
             covered |= mk
             st['obj'] += 1
@@ -92,8 +104,8 @@ def one(r):
             cand.append(int(k))
             covered |= mk
             st['cand'] += 1
-    hole = obj & ~covered
-    ignore |= hole
+    if not a.simple:
+        ignore |= obj & ~covered  # 빈틈은 무시 영역
     rec = [b'FTP1', struct.pack('<IHHHH', r['id'], len(drop), len(cand), len(extra), 0),
            struct.pack(f'<{len(drop)}H', *drop), struct.pack(f'<{len(cand)}H', *cand)]
     for e in extra:
@@ -112,6 +124,7 @@ def main():
     ap.add_argument('--cover', type=float, default=0.3)
     ap.add_argument('--mix', type=float, default=0.2)
     ap.add_argument('--min_piece', type=float, default=0.001)
+    ap.add_argument('--simple', action='store_true', help='벽·천장·바닥(땅 포함)만 과반이면 뺀다. 나누기·SigLIP 후보·무시 영역 없음')
     ap.add_argument('--workers', type=int, default=24)
     ap.add_argument('--out', default='data/teacher/train2017.plan')
     a = ap.parse_args()

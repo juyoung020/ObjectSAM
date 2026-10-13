@@ -210,6 +210,15 @@ void Dataset::open_teacher() {
       else i++;
     }
   }
+  std::unordered_map<uint32_t, int> over;
+  if (!cfg.oversample_ids.empty()) {
+    auto txt = read_file(cfg.oversample_ids);
+    std::string s(txt.begin(), txt.end());
+    for (size_t i = 0; i < s.size();) {
+      if (isdigit(s[i])) { size_t j = i; while (j < s.size() && isdigit(s[j])) j++; over[uint32_t(std::stoul(s.substr(i, j - i)))] = 1; i = j; }
+      else i++;
+    }
+  }
   size_t a = 0, b = 0, skipped = 0;
   while (a < f.len) {
     FSO_ASSERT(!memcmp(f.base + a, "FTL1", 4) && !memcmp(p.base + b, "FTP1", 4), "teacher/plan record at %zu/%zu", a, b);
@@ -219,7 +228,7 @@ void Dataset::open_teacher() {
     memcpy(&pid, p.base + b + 4, 4); memcpy(&nd, p.base + b + 8, 2); memcpy(&nc, p.base + b + 10, 2); memcpy(&ne, p.base + b + 12, 2);
     FSO_ASSERT(id == pid, "teacher %u vs plan %u", id, pid);
     if (excl.count(id)) skipped++;
-    else { trec_.push_back({id, int64_t(a), int64_t(b), int(W), int(H)}); train_.push_back({-1, int64_t(trec_.size() - 1), 0}); }
+    else { trec_.push_back({id, int64_t(a), int64_t(b), int(W), int(H)}); train_.push_back({-1, int64_t(trec_.size() - 1), 0}); over_.push_back(char(over.count(id) ? 1 : 0)); }
     uint32_t nb;
     memcpy(&nb, f.base + a + 16 + size_t(n) * 8, 4);
     a += 16 + size_t(n) * 8 + 4 + nb;
@@ -268,6 +277,13 @@ std::vector<int64_t> Dataset::perm(int64_t epoch) {
   std::vector<int64_t> p(train_.size());
   for (size_t i = 0; i < p.size(); i++) p[i] = int64_t(i);
   std::mt19937_64 r(cfg.seed * 1000003ull + uint64_t(epoch));
+  if (!over_.empty()) {   // --oversample: 표시된 항목을 한 번 더 넣고 섞은 뒤 원래 길이로 자른다(epoch 길이 그대로)
+    for (size_t i = 0; i < over_.size(); i++)
+      for (int c = 0; c < (over_[i] ? cfg.oversample_k - 1 : 0); c++) p.push_back(int64_t(i));
+    std::shuffle(p.begin(), p.end(), r);
+    p.resize(train_.size());
+    return p;
+  }
   std::shuffle(p.begin(), p.end(), r);
   return p;
 }

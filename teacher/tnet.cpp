@@ -608,6 +608,49 @@ void TeacherNetT<AB, AP, AD>::postprocess_async(const ViewGeom& g, int16_t* h_id
 }
 
 template <class AB, class AP, class AD>
+void TeacherNetT<AB, AP, AD>::backbone_per_view(const AB* x) {
+  int T0 = T;
+  AP* r0[4];
+  for (int s = 0; s < 4; s++) r0[s] = res[s];
+  for (int v = 0; v < T0; v++) {
+    T = 1;
+    for (int s = 0; s < 4; s++) res[s] = r0[s] + int64_t(v) * lh[s] * lw[s] * chans(s);
+    backbone(x + int64_t(v) * Hp * Wp * 3);
+  }
+  T = T0;
+  for (int s = 0; s < 4; s++) res[s] = r0[s];
+}
+
+template <class AB, class AP, class AD>
+void TeacherNetT<AB, AP, AD>::release_scratch(bool decoder_too) {
+  CUDA_CHECK(cudaStreamSynchronize(st));
+  for (DBuf* b : {&b_r, &b_r2, &b_patch, &b_t, &b_dwo, &b_g, &b_tmp2, &b_gfbuf, &b_gfspec, &b_gfwork, &b_fused, &b_src, &b_srca,
+                  &b_q, &b_val, &b_off, &b_aw, &b_samp, &b_h, &b_xa, &b_xb, &b_f32a, &b_f32b, &b_ws, &b_res[0], &b_res[1], &b_res[2], &b_res[3]})
+    b->release();
+  if (!decoder_too) return;
+  for (int l = 0; l < 3; l++) b_dsrc[l].release(), b_kin2[l].release(), b_kin3[l].release(), b_mfl[l].release();
+  for (DBuf* b : {&b_out2, &b_out2a, &b_out3, &b_out3a, &b_qin, &b_kin, &b_me, &b_ml, &b_Qp, &b_K, &b_V, &b_S, &b_P, &b_O, &b_dn})
+    b->release();
+}
+
+template <class AB, class AP, class AD>
+void TeacherNetT<AB, AP, AD>::parts_async(const ViewGeom& g, const PartCfg& cfg, PartInfo* h_info, int* h_n,
+                                          unsigned long long* h_bits) {
+  const int Q = kQ;
+  int64_t HW = int64_t(g.OH) * g.OW;
+  // postprocess_async 가 잡은 버퍼를 그대로 읽는다(get 이 더 크게 다시 잡지 않는 크기).
+  auto* bits = b_pbits.get<unsigned long long>(HW);
+  auto* info = b_pinfo.get<PartInfo>(kMaxParts);
+  int* n = b_pn.get<int>(1);
+  part_candidates(static_cast<float*>(b_fused.p), static_cast<int*>(b_order.p), static_cast<float*>(b_p.p),
+                  static_cast<int16_t*>(b_id.p), static_cast<int*>(b_area.p), static_cast<float*>(b_score.p), Q, HW, cfg,
+                  b_pfull.get<int>(Q), b_pssum.get<float>(Q), b_pinter.get<int>(int64_t(Q) * Q), info, n, bits, st);
+  CUDA_CHECK(cudaMemcpyAsync(h_n, n, sizeof(int), cudaMemcpyDeviceToHost, st));
+  CUDA_CHECK(cudaMemcpyAsync(h_info, info, kMaxParts * sizeof(PartInfo), cudaMemcpyDeviceToHost, st));
+  CUDA_CHECK(cudaMemcpyAsync(h_bits, bits, HW * sizeof(unsigned long long), cudaMemcpyDeviceToHost, st));
+}
+
+template <class AB, class AP, class AD>
 void TeacherNetT<AB, AP, AD>::postprocess(const ViewGeom& g, TeacherResult& out) {
   out.OH = g.OH, out.OW = g.OW;
   out.id.resize(int64_t(g.OH) * g.OW);

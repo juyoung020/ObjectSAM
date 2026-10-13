@@ -147,3 +147,29 @@ void sine_pos(int H, int W, int T, const float* add, float* out, cudaStream_t st
 void rank_scores(const float* cls, int Q, float* p, int* order, cudaStream_t st);
 // 최종 점수 score[k] = p[order[k]] · mscore[k]
 void final_scores(const float* p, const int* order, const float* mscore, int Q, float* score, cudaStream_t st);
+
+// ---------------------------------------------------------------- 부품 후보(teacher_label --parts)
+// 겹치지 않는 id 지도에서 대부분 가려졌지만 확신 있는 마스크 = 다른 남은 마스크 안의 부품 후보.
+struct PartCfg {
+  float score = 0.5f;     // 온전한(펴기 전) 마스크 점수 ≥ (물체 확률 × 온전한 마스크 안 평균 sigmoid(확률))
+  int min_area = 100;     // 온전한 넓이 ≥ (사진 해상도 화소)
+  float max_vis = 0.5f;   // id 지도에서 보이는 비율 <
+  float inside = 0.8f;    // 부모(앞 순위 마스크의 보이는 영역) 안 비율 ≥
+  float rel_lo = 0.01f;   // 부품 넓이 / 부모 보이는 넓이 ∈ [rel_lo, rel_hi]
+  float rel_hi = 0.7f;
+  float parent_score = 0.5f;  // 부모의 FTL 점수 ≥
+};
+constexpr int kMaxParts = 64;
+struct PartInfo {
+  int rank;      // 순위 k (0..Q-1, FTL 에 없을 수도 있다: 보이는 넓이 0)
+  int parent;    // 부모 순위
+  float score;   // 온전한 마스크 점수
+  int full;      // 온전한 넓이
+  int vis;       // 보이는 넓이
+  float inside;  // 부모 안 비율
+};
+// postprocess_async 직후 같은 버퍼로. bits[i] 의 c 번 비트 = c 번 후보가 화소 i 를 덮음. n[0] = 후보 수(≤ kMaxParts).
+// full_area·ssum [Q], inter [Q·Q] 작업 버퍼.
+void part_candidates(const float* fused, const int* order, const float* p, const int16_t* id, const int* area,
+                     const float* score, int Q, int64_t HW, const PartCfg& cfg, int* full_area, float* ssum, int* inter,
+                     PartInfo* info, int* n, unsigned long long* bits, cudaStream_t st);

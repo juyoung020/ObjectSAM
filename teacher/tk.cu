@@ -948,3 +948,80 @@ I_TI_A(float, float)
 I_TI_A(float, __half)
 I_TI_A(__half, __half)
 I_TI_A(__half, float)
+
+// ---------------------------------------------------------------- 부품 후보
+namespace {
+// 블록 k: 온전한 마스크(fused > 0.5)의 넓이·sigmoid 합, 그리고 그 화소가 id 지도에서 누구 것인지 히스토그램.
+__global__ void k_part_stats(const float* fused, const int* order, const int16_t* id, int Q, int64_t HW, int* full_area,
+                             float* ssum, int* inter) {
+  extern __shared__ int hist[];
+  __shared__ float sh[32];
+  int k = blockIdx.x;
+  for (int j = threadIdx.x; j < Q; j += blockDim.x) hist[j] = 0;
+  __syncthreads();
+  const float* f = fused + int64_t(order[k]) * HW;
+  float s = 0.f, a = 0.f;
+  for (int64_t i = threadIdx.x; i < HW; i += blockDim.x) {
+    float v = f[i];
+    if (v > 0.5f) {
+      s += 1.f / (1.f + expf(-v)), a += 1.f;
+      int j = id[i];
+      if (j >= 0) atomicAdd(&hist[j], 1);
+    }
+  }
+  s = block_sum(s, sh);
+  a = block_sum(a, sh);
+  if (threadIdx.x == 0) ssum[k] = s, full_area[k] = int(a);
+  __syncthreads();
+  for (int j = threadIdx.x; j < Q; j += blockDim.x) inter[int64_t(k) * Q + j] = hist[j];
+}
+__global__ void k_part_select(const int* order, const float* p, const int* area, const float* score, int Q,
+                              const int* full_area, const float* ssum, const int* inter, PartCfg c, PartInfo* info, int* n) {
+  __shared__ PartInfo cand[1024];
+  __shared__ int ok[1024];
+  int k = threadIdx.x;
+  if (k < Q) {
+    ok[k] = 0;
+    int full = full_area[k];
+    float fs = p[order[k]] * ssum[k] / (float(full) + 1e-6f);
+    if (full >= c.min_area && fs >= c.score && float(area[k]) < c.max_vis * float(full)) {
+      int best = -1, bi = 0;
+      for (int j = 0; j < k; j++) {
+        int v = inter[int64_t(k) * Q + j];
+        if (v > bi && score[j] >= c.parent_score) bi = v, best = j;
+      }
+      if (best >= 0 && float(bi) >= c.inside * float(full) && float(full) >= c.rel_lo * float(area[best]) &&
+          float(full) <= c.rel_hi * float(area[best])) {
+        ok[k] = 1;
+        cand[k] = PartInfo{k, best, fs, full, area[k], float(bi) / float(full)};
+      }
+    }
+  }
+  __syncthreads();
+  if (k == 0) {
+    int m = 0;
+    for (int q = 0; q < Q && m < kMaxParts; q++)
+      if (ok[q]) info[m++] = cand[q];
+    n[0] = m;
+  }
+}
+__global__ void k_part_pack(const float* fused, const int* order, const PartInfo* info, const int* n, int64_t HW,
+                            unsigned long long* bits) {
+  int m = n[0];
+  for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < HW; i += int64_t(gridDim.x) * blockDim.x) {
+    unsigned long long b = 0;
+    for (int c = 0; c < m; c++)
+      if (fused[int64_t(order[info[c].rank]) * HW + i] > 0.5f) b |= 1ull << c;
+    bits[i] = b;
+  }
+}
+}  // namespace
+
+void part_candidates(const float* fused, const int* order, const float* p, const int16_t* id, const int* area,
+                     const float* score, int Q, int64_t HW, const PartCfg& cfg, int* full_area, float* ssum, int* inter,
+                     PartInfo* info, int* n, unsigned long long* bits, cudaStream_t st) {
+  FSO_ASSERT(Q <= 1024, "Q %d", Q);
+  k_part_stats<<<Q, 1024, Q * sizeof(int), st>>>(fused, order, id, Q, HW, full_area, ssum, inter);
+  k_part_select<<<1, 1024, 0, st>>>(order, p, area, score, Q, full_area, ssum, inter, cfg, info, n);
+  k_part_pack<<<nblk(HW), kT, 0, st>>>(fused, order, info, n, HW, bits);
+}

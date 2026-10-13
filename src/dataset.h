@@ -58,6 +58,8 @@ struct DataCfg {
   std::string teacher_ftl, teacher_plan, teacher_siglip;  // siglip 은 없어도 됨(그러면 후보는 물체)
   std::string images = "data/coco/train2017", nonjpeg = "data/teacher/nonjpeg";
   std::string exclude_ids;                                 // 학습에서 뺄 image_id(JSON 정수 목록, 검증으로 뗀 것)
+  int oversample_k = 2;                                    // 표시된 사진을 몇 배로(--oversample-k)
+  std::string oversample_ids;                              // 2 배로 자주 뽑을 image_id(정수 목록) — epoch 길이는 그대로(2026-10-12)
   float score_thr = 0.5f, siglip_thr = 0.8f;
 };
 
@@ -122,5 +124,6 @@ class Dataset {
   std::vector<int64_t> perm_epoch_;  // 현재 epoch 의 순서
   int64_t perm_for_epoch_ = -1;
   std::vector<int64_t> perm(int64_t epoch);
+  std::vector<char> over_;  // train_ 항목마다 2 배 뽑기 표시
   std::mutex perm_mu_;
 };
