@@ -1,0 +1,66 @@
+LVIS train imgs 100170 in coco train2017 100170 in val2017 0
+LVIS val imgs 19809 in coco train2017 15000 in val2017 4809
+LVIS val annotations on COCO train2017 images (not used now): 194035
+COCO train2017 images with no LVIS at all: 3117
+
+name | inst | imgs | not_exhaustive imgs | freq
+book | 33353 | 1903 | 686 (36%) | f
+chair | 11549 | 1927 | 314 (16%) | f
+taillight | 9222 | 1885 | 368 (20%) | f
+knob | 8432 | 1567 | 238 (15%) | f
+handle | 8314 | 1886 | 262 (14%) | f
+drawer | 7927 | 1942 | 111 (6%) | f
+streetlight | 7381 | 1765 | 436 (25%) | f
+cabinet | 7371 | 1659 | 602 (36%) | f
+headlight | 7326 | 1843 | 291 (16%) | f
+traffic_light | 7298 | 1890 | 294 (16%) | f
+cushion | 7174 | 1240 | 169 (14%) | f
+lightbulb | 7075 | 861 | 288 (33%) | f
+pillow | 6115 | 1912 | 117 (6%) | f
+pipe | 4762 | 1413 | 285 (20%) | f
+curtain | 4506 | 1890 | 190 (10%) | f
+lamp | 4139 | 1802 | 124 (7%) | f
+doorknob | 4072 | 1710 | 175 (10%) | f
+rearview_mirror | 3650 | 1115 | 215 (19%) | f
+mirror | 3490 | 1901 | 124 (7%) | f
+poster | 3378 | 808 | 108 (13%) | f
+vent | 3370 | 1468 | 113 (8%) | f
+blanket | 3075 | 1671 | 80 (5%) | f
+wall_socket | 3069 | 1855 | 89 (5%) | f
+lampshade | 2475 | 1210 | 29 (2%) | f
+sofa | 2408 | 1899 | 63 (3%) | f
+lamppost | 2234 | 595 | 98 (16%) | f
+towel | 2212 | 636 | 72 (11%) | f
+bed | 2137 | 1765 | 34 (2%) | f
+deck_chair | 1787 | 236 | 88 (37%) | f
+brake_light | 1334 | 223 | 52 (23%) | f
+bath_towel | 1210 | 349 | 45 (13%) | f
+armchair | 1112 | 561 | 23 (4%) | f
+towel_rack | 987 | 570 | 29 (5%) | f
+fan | 737 | 575 | 6 (1%) | f
+saddle_blanket | 648 | 347 | 17 (5%) | f
+hand_towel | 619 | 200 | 25 (12%) | f
+paper_towel | 600 | 468 | 15 (3%) | f
+shower_curtain | 479 | 381 | 8 (2%) | f
+booklet | 439 | 86 | 11 (13%) | c
+spotlight | 403 | 60 | 17 (28%) | c
+chandelier | 392 | 263 | 13 (5%) | f
+folding_chair | 303 | 67 | 8 (12%) | c
+notebook | 290 | 189 | 9 (5%) | f
+blinder_(for_horses) | 271 | 113 | 7 (6%) | f
+window_box_(for_plants) | 253 | 70 | 12 (17%) | c
+dishtowel | 223 | 134 | 5 (4%) | f
+radiator | 195 | 180 | 0 (0%) | f
+bedspread | 188 | 125 | 5 (4%) | f
+fire_alarm | 151 | 130 | 2 (2%) | f
+bookcase | 113 | 70 | 11 (16%) | c
+wheelchair | 107 | 87 | 4 (5%) | c
+highchair | 98 | 90 | 0 (0%) | c
+comic_book | 97 | 5 | 1 (20%) | r
+table_lamp | 81 | 56 | 5 (9%) | c
+doormat | 78 | 66 | 3 (5%) | c
+duct_tape | 77 | 21 | 2 (10%) | c
+rocking_chair | 70 | 55 | 2 (4%) | c
+file_cabinet | 53 | 32 | 4 (12%) | c
+
+images with any not_exhaustive cat: 26213 / 100170

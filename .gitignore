@@ -1,0 +1,13 @@
+data/
+weights/
+runs/
+build/
+__pycache__/
+.venv/
+*.tar
+third_party/
+.venv-teacher/
+# 분석 중간 결과(크다; 스크립트로 다시 만든다)
+analysis/**/*.pkl
+analysis/**/*.log
+*.pyc

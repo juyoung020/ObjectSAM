@@ -1,0 +1,4 @@
+ceiling images 291 (every 40)  orphan blobs >=200px after 2px opening: 6.29/img
+  source: {'dropped_struct': 2.38, 'dropped_frag_blob': 3.5, 'lowscore_0.2-0.5': 0.35, 'lowscore_<0.2': 0.05}
+  area (% image) quartiles: [0.11 0.2  0.54 1.64]
+  majority panoptic class under blob (top 15): [('VOID', 1365), ('building-other-merged', 134), ('tree-merged', 108), ('fence-merged', 55), ('rug-merged', 44), ('sky-other-merged', 33), ('paper-merged', 31), ('fruit', 20), ('flower', 12), ('food-other-merged', 9), ('roof', 6), ('tent', 4), ('house', 3), ('mountain-merged', 3), ('bridge', 1)]
